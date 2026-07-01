@@ -1,0 +1,18 @@
+# Core API
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pydantic>=2.6
+
+# Document parsing
+pypdf>=4.0
+python-docx>=1.1
+
+# Optional: LegalBERT clause classification backend.
+# These are only imported lazily in app/clauses/classifier.py; the rule-based
+# backend works without them so the service runs out of the box.
+# transformers>=4.40
+# torch>=2.2
+
+# Testing
+pytest>=8.0

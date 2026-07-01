@@ -1,0 +1,21 @@
+MUTUAL NON-DISCLOSURE AGREEMENT
+
+This Mutual Non-Disclosure Agreement ("Agreement") is made and entered into by and between Acme Corporation and Globex LLC, dated as of January 1, 2026.
+
+1. Confidentiality
+Each party agrees to hold in strict confidence all Confidential Information and proprietary information disclosed by the other party, and shall not disclose such trade secret information to any third party without prior written consent.
+
+2. Term and Termination
+This Agreement shall remain in effect for a period of two (2) years. Either party may terminate this Agreement upon thirty (30) days written notice of termination to the other party.
+
+3. Intellectual Property
+All intellectual property, including any copyright, patent, or trademark rights in the Confidential Information, shall remain the sole property of the disclosing party. No license is granted under this Agreement.
+
+4. Limitation of Liability
+In no event shall either party be liable for any consequential damages arising out of this Agreement. The total liability of either party shall not exceed the fees paid hereunder.
+
+5. Indemnification
+Each party shall indemnify and hold harmless the other party from any claims arising out of a breach of this Agreement, and shall defend the other party against such claims.
+
+6. Governing Law
+This Agreement shall be governed by the laws of the State of Delaware, and the parties consent to the exclusive jurisdiction and venue of the courts located therein.
