@@ -19,3 +19,8 @@ torch>=2.2
 
 # Testing
 pytest>=8.0
+
+# One-time CUAD fixture generation (scripts/generate_cuad_sample.py only;
+# not needed to run the app or to score against the already-committed
+# data/cuad_sample.json fixture).
+datasets>=2.19
