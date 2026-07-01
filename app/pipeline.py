@@ -58,6 +58,12 @@ def _split_party_list(span: str) -> list[str]:
     # Normalize the final ", and " / " and " into a plain comma so a
     # straight split(",") below yields every party, including 2-party spans
     # with no comma at all ("A and B" -> "A, B").
+    # Known limitation: the "[^,]*$" lookahead can't anchor on the *last*
+    # "and" when the span has no commas at all (e.g. a fully comma-free
+    # 3+-party list like "A and B and C"), so the leftmost "and" is
+    # normalized instead and the trailing two parties end up merged. This is
+    # accepted as atypical input -- legal preambles almost always use serial
+    # commas for 3+ parties.
     span = re.sub(r"\s*,?\s+and\s+(?=[^,]*$)", ", ", span, count=1)
     parts = [p.strip(" ,.") for p in span.split(",")]
     return [" ".join(p.split())[:120] for p in parts if p.strip()]

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
@@ -98,7 +99,14 @@ def main() -> None:
     if args.backend in ("rule", "both"):
         print_report("RuleBasedClassifier", score(RuleBasedClassifier(), records))
     if args.backend in ("legalbert", "both"):
-        print_report("LegalBertClassifier", score(LegalBertClassifier(), records))
+        legalbert_classifier = LegalBertClassifier()
+        if not legalbert_classifier._ensure_embed_fn():
+            print(
+                "WARNING: LegalBERT embedding backend unavailable — results below "
+                "are the RuleBasedClassifier fallback, not a real LegalBERT run.",
+                file=sys.stderr,
+            )
+        print_report("LegalBertClassifier", score(legalbert_classifier, records))
 
 
 if __name__ == "__main__":

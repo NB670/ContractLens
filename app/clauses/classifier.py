@@ -6,8 +6,10 @@ Two backends are provided:
     category taxonomy. No model download, runs anywhere, and gives us a baseline
     to evaluate the learned model against in later checkpoints.
 
-  * ``LegalBertClassifier`` — optional zero-shot/embedding backend built on
-    HuggingFace Transformers + LegalBERT. Imported lazily so the service runs
+  * ``LegalBertClassifier`` — optional embedding backend built on HuggingFace
+    Transformers + LegalBERT. Each category and clause is embedded via
+    mean-pooled token embeddings and compared by cosine similarity; there is
+    no zero-shot/NLI head involved. Imported lazily so the service runs
     without torch/transformers installed.
 
 Both implement ``classify(text) -> (category, confidence)`` and a convenience
@@ -15,6 +17,8 @@ Both implement ``classify(text) -> (category, confidence)`` and a convenience
 """
 
 from __future__ import annotations
+
+from typing import Callable
 
 from app.clauses.categories import CATEGORY_KEYWORDS, UNCLASSIFIED
 from app.config import settings
@@ -87,7 +91,11 @@ class LegalBertClassifier:
     a missing optional dependency.
     """
 
-    def __init__(self, model_name: str | None = None, embed_fn=None) -> None:
+    def __init__(
+        self,
+        model_name: str | None = None,
+        embed_fn: Callable[[str], "torch.Tensor"] | None = None,
+    ) -> None:
         self.model_name = model_name or settings.legalbert_model
         self._embed_fn = embed_fn
         self._fallback = RuleBasedClassifier()
