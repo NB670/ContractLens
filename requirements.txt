@@ -4,6 +4,9 @@ uvicorn[standard]>=0.29
 python-multipart>=0.0.9
 pydantic>=2.6
 
+# Persistent storage
+sqlmodel>=0.0.21
+
 # Document parsing
 pypdf>=4.0
 python-docx>=1.1

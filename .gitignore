@@ -15,6 +15,7 @@ env/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+*.db
 
 # Local model caches (LegalBERT, HuggingFace)
 .cache/
