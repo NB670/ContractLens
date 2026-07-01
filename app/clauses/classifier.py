@@ -53,42 +53,92 @@ class RuleBasedClassifier:
         return best, confidence
 
 
-class LegalBertClassifier:
-    """Optional LegalBERT-backed classifier (HuggingFace Transformers).
+def _mean_pool(last_hidden_state, attention_mask):
+    """Attention-mask-weighted mean of token embeddings -> one vector per row.
 
-    Falls back to the rule-based classifier if transformers/torch or the model
-    are unavailable, so the pipeline never hard-fails on a missing optional dep.
+    `last_hidden_state`: (batch, seq_len, hidden) tensor.
+    `attention_mask`: (batch, seq_len) tensor of 0/1.
+    Returns a (batch, hidden) tensor. Deliberately takes plain tensors (no
+    `torch` import needed here) so this module still only imports transformers
+    /torch lazily inside LegalBertClassifier.
+    """
+    mask = attention_mask.unsqueeze(-1).float()
+    summed = (last_hidden_state * mask).sum(dim=1)
+    counts = mask.sum(dim=1).clamp(min=1e-9)
+    return summed / counts
+
+
+def _cosine_similarity(a, b) -> float:
+    a_norm = a / a.norm()
+    b_norm = b / b.norm()
+    return float((a_norm * b_norm).sum())
+
+
+class LegalBertClassifier:
+    """LegalBERT-backed classifier using embedding + cosine similarity.
+
+    `nlpaueb/legal-bert-base-uncased` is a base encoder with no
+    classification/NLI head, so this does not use a zero-shot-classification
+    pipeline (which would require one). Instead, each category's keyword
+    description and each clause are embedded via mean-pooled LegalBERT token
+    embeddings, and the category with highest cosine similarity to the
+    clause wins. Falls back to the rule-based classifier if transformers/
+    torch or the model are unavailable, so the pipeline never hard-fails on
+    a missing optional dependency.
     """
 
-    def __init__(self, model_name: str | None = None) -> None:
+    def __init__(self, model_name: str | None = None, embed_fn=None) -> None:
         self.model_name = model_name or settings.legalbert_model
-        self._pipeline = None
+        self._embed_fn = embed_fn
         self._fallback = RuleBasedClassifier()
-        self._labels = list(CATEGORY_KEYWORDS.keys())
+        self._category_embeddings = None
 
-    def _ensure_pipeline(self) -> bool:
-        if self._pipeline is not None:
+    def _ensure_embed_fn(self) -> bool:
+        if self._embed_fn is not None:
             return True
         try:  # pragma: no cover - depends on optional heavy deps
-            from transformers import pipeline
-
-            self._pipeline = pipeline(
-                "zero-shot-classification", model=self.model_name
-            )
-            return True
+            import torch
+            from transformers import AutoModel, AutoTokenizer
         except Exception:
-            # transformers/torch/model not available — use the rule baseline.
-            self._pipeline = None
             return False
+
+        try:  # pragma: no cover - depends on optional heavy deps
+            tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            model = AutoModel.from_pretrained(self.model_name)
+            model.eval()
+        except Exception:
+            return False
+
+        def embed_fn(text: str):
+            inputs = tokenizer(
+                text, return_tensors="pt", truncation=True, max_length=256, padding=True
+            )
+            with torch.no_grad():
+                outputs = model(**inputs)
+            return _mean_pool(outputs.last_hidden_state, inputs["attention_mask"])[0]
+
+        self._embed_fn = embed_fn
+        return True
 
     def classify(self, text: str) -> tuple[str, float]:
         if not text or not text.strip():
             return UNCLASSIFIED, 0.0
-        if not self._ensure_pipeline():
+        if not self._ensure_embed_fn():
             return self._fallback.classify(text)
-        try:  # pragma: no cover - depends on optional heavy deps
-            result = self._pipeline(text, candidate_labels=self._labels)
-            return result["labels"][0], round(float(result["scores"][0]), 3)
+        try:
+            if self._category_embeddings is None:
+                self._category_embeddings = {
+                    category: self._embed_fn(f"{category}: {', '.join(keywords)}")
+                    for category, keywords in CATEGORY_KEYWORDS.items()
+                }
+            clause_embedding = self._embed_fn(text)
+            best_category, best_score = UNCLASSIFIED, -1.0
+            for category, ref_embedding in self._category_embeddings.items():
+                score = _cosine_similarity(clause_embedding, ref_embedding)
+                if score > best_score:
+                    best_category, best_score = category, score
+            confidence = max(0.0, min(1.0, best_score))
+            return best_category, round(confidence, 3)
         except Exception:
             return self._fallback.classify(text)
 

@@ -11,11 +11,11 @@ sqlmodel>=0.0.21
 pypdf>=4.0
 python-docx>=1.1
 
-# Optional: LegalBERT clause classification backend.
-# These are only imported lazily in app/clauses/classifier.py; the rule-based
-# backend works without them so the service runs out of the box.
-# transformers>=4.40
-# torch>=2.2
+# LegalBERT clause classification backend (embedding + cosine similarity).
+# Imported lazily in app/clauses/classifier.py; the rule-based backend still
+# works without these installed, so a lighter-weight deployment can omit them.
+transformers>=4.40
+torch>=2.2
 
 # Testing
 pytest>=8.0
