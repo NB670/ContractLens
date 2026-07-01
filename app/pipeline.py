@@ -23,12 +23,23 @@ _TYPE_PATTERNS = [
     (r"license agreement", "License Agreement"),
     (r"lease agreement", "Lease Agreement"),
     (r"purchase agreement", "Purchase Agreement"),
+    (r"consulting agreement", "Consulting Agreement"),
+    (r"supply agreement", "Supply Agreement"),
+    (r"reseller agreement", "Reseller Agreement"),
+    (r"franchise agreement", "Franchise Agreement"),
+    (r"joint venture agreement", "Joint Venture Agreement"),
     (r"service agreement", "Service Agreement"),
 ]
 
-# "by and between X and Y" / "between X and Y"
+# Two forms of party preamble:
+#   - "by and between/among X, Y, and Z" (N parties, named group `n_party`)
+#   - "between X and Y" (exactly 2 parties, named groups `party_a`/`party_b`)
+# The first alternative is tried first so "by and between ..." text (which
+# also contains the literal substring "between") is captured by the N-party
+# path rather than falling through to the 2-party path.
 _PARTIES_RE = re.compile(
-    r"between\s+(.+?)\s+and\s+(.+?)(?:\s*[\.,\(]|\bdated\b|$)",
+    r"by and (?:between|among)\s+(?P<n_party>.+?)(?:\s*[\.\(]|\bdated\b|$)"
+    r"|between\s+(?P<party_a>.+?)\s+and\s+(?P<party_b>.+?)(?:\s*[\.,\(]|\bdated\b|$)",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -41,12 +52,28 @@ def _detect_type(text: str) -> str:
     return "Unknown"
 
 
+def _split_party_list(span: str) -> list[str]:
+    """Split a preamble party-list span like "A, B, and C" into parties."""
+    span = span.strip(" ,.")
+    # Normalize the final ", and " / " and " into a plain comma so a
+    # straight split(",") below yields every party, including 2-party spans
+    # with no comma at all ("A and B" -> "A, B").
+    span = re.sub(r"\s*,?\s+and\s+(?=[^,]*$)", ", ", span, count=1)
+    parts = [p.strip(" ,.") for p in span.split(",")]
+    return [" ".join(p.split())[:120] for p in parts if p.strip()]
+
+
 def _detect_parties(text: str) -> list[str]:
     match = _PARTIES_RE.search(text[:2000])
     if not match:
         return []
+
+    n_party_span = match.group("n_party")
+    if n_party_span is not None:
+        return _split_party_list(n_party_span)
+
     parties = []
-    for group in match.groups():
+    for group in (match.group("party_a"), match.group("party_b")):
         cleaned = " ".join(group.split())[:120].strip(" ,.")
         if cleaned:
             parties.append(cleaned)
