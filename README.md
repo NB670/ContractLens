@@ -7,38 +7,35 @@ representations that support clause classification, semantic retrieval, contract
 comparison, risk analysis, and question answering. The platform is designed to run
 locally so that privacy-sensitive contracts never have to leave the user's machine.
 
-This repository currently contains the **Checkpoint 2** deliverable: the contract
-ingestion and clause-intelligence pipeline.
+## What's implemented
 
-## Checkpoint 2 scope (this deliverable)
-
-Per the project milestone chart, Checkpoint 2 covers:
-
-> Contract ingestion and clause intelligence — Implement the contract upload and
-> parsing pipeline, structured extraction, and clause visualization. Users should
-> be able to upload and view identified categories.
-
-What is implemented here:
-
-- A **FastAPI** service exposing a `/upload` endpoint that accepts PDF, DOCX, or
-  TXT contracts.
-- A **document parsing layer** that extracts raw text from each supported format
-  (`app/ingestion/parsers.py`).
+- A **FastAPI** service exposing `/upload`, `/contracts/{id}`, and
+  `/contracts/{id}/view` endpoints for uploading and reviewing contracts.
+- A **document parsing layer** that extracts raw text from PDF, DOCX, and TXT
+  contracts (`app/ingestion/parsers.py`).
 - A **clause segmenter** that splits a contract into individual clauses/sections
   using heading and numbering heuristics (`app/ingestion/segmenter.py`).
-- A **clause classifier** that labels each clause with one of the key CUAD-style
+- A **clause classifier** that labels each clause with one of 10 CUAD-style
   categories (confidentiality, termination, liability, indemnification,
-  intellectual property, ...). It ships with a transparent keyword/rule-based
-  backend and an optional LegalBERT (HuggingFace Transformers) backend that is
-  loaded only if `transformers` and a model are available
-  (`app/clauses/classifier.py`).
-- A **structured contract model** capturing contract type, parties, key sections,
-  identified clauses, and metadata (`app/models/contract.py`).
-- A minimal **clause-visualization** view (`/contracts/{id}`) that lists the
-  identified categories and links each one back to its source text.
-
-> NOTE: This is autonomously generated starter code matching the team's own
-> Checkpoint 2 plan. It is a head start, not a benchmark or a ceiling.
+  intellectual property, governing law, payment terms, warranty, assignment,
+  force majeure). Two backends are available (`app/clauses/classifier.py`):
+  - `RuleBasedClassifier` (default) — transparent keyword scoring, no model
+    download required.
+  - `LegalBertClassifier` — embeds each clause and each category's keyword
+    description with LegalBERT (HuggingFace Transformers) and classifies by
+    cosine similarity.
+- **Metadata extraction** that detects contract type (12 common types) and
+  party names, including multi-party ("by and among A, B, and C") preambles
+  (`app/pipeline.py`).
+- A **structured contract model** capturing contract type, parties, key
+  sections, identified clauses, and metadata (`app/models/contract.py`).
+- A **persistent SQLite-backed contract store**, so uploaded contracts survive
+  a server restart (`app/store.py`).
+- A **clause-visualization** view (`/contracts/{id}/view`) that lists the
+  identified categories and shows each clause's text and category tag.
+- A **CUAD-based evaluation harness** that scores both classifier backends
+  against real labeled CUAD data with precision/recall/F1
+  (`scripts/evaluate_clauses.py`, `data/cuad_sample.json`).
 
 ## Architecture
 
@@ -52,30 +49,42 @@ contract file ──▶ parsers ──▶ raw text
                         classifier (CUAD categories)
                                   │
                                   ▼
-                     structured Contract model ──▶ FastAPI JSON / HTML view
+                     structured Contract model
+                                  │
+                                  ▼
+              SQLite-backed store ──▶ FastAPI JSON / HTML view
 ```
 
 ## Project layout
 
 ```
 app/
-  main.py                 FastAPI app + routes (/upload, /contracts/{id})
-  config.py               runtime configuration
+  main.py                  FastAPI app + routes (/upload, /contracts/{id}, /contracts/{id}/view)
+  config.py                 runtime configuration (env vars below)
+  pipeline.py                parse -> segment -> classify -> store orchestration;
+                              contract-type and party detection
+  store.py                   SQLite-backed contract store (SQLModel)
   ingestion/
-    parsers.py            PDF / DOCX / TXT text extraction
-    segmenter.py          split text into clauses/sections
+    parsers.py                PDF / DOCX / TXT text extraction
+    segmenter.py               split text into clauses/sections
   clauses/
-    categories.py         canonical CUAD-style clause categories
-    classifier.py         rule-based + optional LegalBERT classifier
+    categories.py              canonical CUAD-style clause categories
+    classifier.py               rule-based + LegalBERT (embedding + cosine similarity) classifiers
   models/
-    contract.py           Contract / Clause data models
-  store.py                in-memory contract store (CP2 placeholder)
+    contract.py                 Contract / Clause data models
+scripts/
+  generate_cuad_sample.py    one-time generator for data/cuad_sample.json
+  evaluate_clauses.py         scores both classifiers against data/cuad_sample.json
 data/
-  sample_contract.txt     tiny sample for local smoke testing
+  sample_contract.txt        tiny sample for local smoke testing
+  cuad_sample.json            350 labeled clauses sampled from CUAD (7 categories)
 tests/
   test_segmenter.py
-  test_classifier.py
   test_parsers.py
+  test_classifier.py
+  test_pipeline.py
+  test_store.py
+  test_evaluate_clauses.py
 requirements.txt
 ```
 
@@ -87,18 +96,64 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Then open <http://127.0.0.1:8000/docs> for the interactive API, upload a contract
-via `POST /upload`, and view the structured breakdown at `/contracts/{id}`.
+Then open <http://127.0.0.1:8000/docs> for the interactive API. Upload a contract
+via `POST /upload` (try `data/sample_contract.txt`), note the returned `id`, then:
+
+- `GET /contracts/{id}` — structured JSON (contract type, parties, clauses, categories)
+- `GET /contracts/{id}/view` — HTML clause-visualization page
+
+Uploaded contracts persist in `contractlens.db` (SQLite) across server restarts.
+
+### Configuration
+
+All settings are optional environment variables (see `app/config.py`):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CONTRACTLENS_MAX_UPLOAD` | `26214400` (25 MB) | max upload size in bytes |
+| `CONTRACTLENS_CLASSIFIER` | `rule` | classifier backend: `rule` or `legalbert` |
+| `CONTRACTLENS_LEGALBERT_MODEL` | `nlpaueb/legal-bert-base-uncased` | HF model id for the LegalBERT backend |
+| `CONTRACTLENS_DB_PATH` | `contractlens.db` | SQLite file path |
+
+## Running the test suite
+
+```bash
+python -m pytest -q
+```
+
+## Evaluating clause classification against CUAD
+
+`data/cuad_sample.json` is a committed, offline-reproducible sample of 350 real
+labeled clauses (from `dvgodoy/CUAD_v1_Contract_Understanding_clause_classification`,
+CC-BY-4.0), covering 7 of the 10 taxonomy categories — CUAD's original 41 categories
+don't include Confidentiality, Indemnification, or Force Majeure, so those 3 are
+excluded from this evaluation.
+
+```bash
+python -m scripts.evaluate_clauses                  # both backends
+python -m scripts.evaluate_clauses --backend rule
+python -m scripts.evaluate_clauses --backend legalbert
+```
+
+Prints per-category and macro-averaged precision/recall/F1 for each backend. To
+regenerate the sample from the source dataset (requires the `datasets` package
+and network access):
+
+```bash
+python -m scripts.generate_cuad_sample
+```
 
 ## Datasets
 
 - **CUAD** (Contract Understanding Atticus Dataset) — clause categories and
   evaluation for classification. The canonical category list in
-  `app/clauses/categories.py` follows the CUAD taxonomy.
-- **ACORD** — used in later checkpoints for clause-retrieval evaluation.
+  `app/clauses/categories.py` follows the CUAD taxonomy; `data/cuad_sample.json`
+  is a real labeled sample used by the evaluation harness above.
+- **ACORD** — planned for clause-retrieval evaluation.
 
-## Roadmap (subsequent checkpoints)
+## Roadmap
 
-- **CP3:** semantic retrieval, contract comparison, and risk reporting.
-- **CP4:** ContractLens UI, local-LLM chatbot integration, and benchmark
-  evaluation (precision / recall / F1, Recall@K, MRR).
+- Semantic retrieval and contract comparison.
+- Risk reporting backed by supporting evidence.
+- ContractLens UI and local-LLM chatbot integration, with benchmark evaluation
+  (Recall@K, MRR) for retrieval.
