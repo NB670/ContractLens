@@ -26,5 +26,14 @@ class Settings:
         "CONTRACTLENS_LEGALBERT_MODEL", "nlpaueb/legal-bert-base-uncased"
     )
 
+    # Retrieval embedding backend: "sentence" (default, semantic) or "hashing"
+    # (dependency-free fallback, same posture as classifier_backend).
+    retrieval_backend: str = os.environ.get("CONTRACTLENS_RETRIEVAL_BACKEND", "sentence")
+
+    # sentence-transformers model id used when retrieval_backend == "sentence".
+    retrieval_model: str = os.environ.get(
+        "CONTRACTLENS_RETRIEVAL_MODEL", "all-MiniLM-L6-v2"
+    )
+
 
 settings = Settings()

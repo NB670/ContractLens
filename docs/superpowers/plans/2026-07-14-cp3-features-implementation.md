@@ -1618,7 +1618,7 @@ def _clause(index: int, text: str, category: str = "Unclassified", start_offset:
 
 def test_uncapped_liability_fires():
     contract = Contract(id="c1", filename="t.txt", source_format="txt", clauses=[
-        _clause(0, "In no event shall either party's liability be capped or limited; liability is unlimited.", "Liability"),
+        _clause(0, "In no event shall either party's liability be capped or limited; each party shall bear unlimited liability for any breach.", "Liability"),
     ])
     report = analyze_risk(contract)
     assert "liability.uncapped" in {f.rule_id for f in report.findings}

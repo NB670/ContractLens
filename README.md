@@ -143,6 +143,45 @@ and network access):
 python -m scripts.generate_cuad_sample
 ```
 
+## Checkpoint 3 — semantic retrieval, comparison, and risk analysis
+
+Building on the CP2 structured `Contract`/`Clause` model, three downstream
+capabilities are implemented:
+
+- **Semantic retrieval** (`app/retrieval/`) — a `SentenceTransformerEmbedder`
+  (`all-MiniLM-L6-v2`, a model purpose-trained for semantic similarity,
+  distinct from reusing LegalBERT's classification embeddings) with a
+  dependency-free `HashingEmbedder` fallback, and an in-memory cosine index
+  (`index.py`) maintained incrementally as contracts are uploaded rather than
+  rebuilt per query.
+  - `GET /search?q=...&k=5[&category=...]` — search clauses across all contracts.
+  - `GET /contracts/{id}/similar/{clause_index}?k=5` — find similar clauses.
+- **Contract comparison** (`app/comparison/comparator.py`) — clause alignment
+  via optimal bipartite matching (`scipy.optimize.linear_sum_assignment`),
+  reporting added / removed / modified / unchanged clauses.
+  - `POST /compare` with two file uploads (`base`, `revised`) returns a diff.
+- **Risk analysis** (`app/risk/analyzer.py`) — transparent, evidence-backed
+  regex rules keyed off the clause taxonomy; every finding cites the clause
+  span (offsets) it fired on, plus whole-contract "missing protective clause"
+  checks.
+  - `GET /contracts/{id}/risk` — evidence-backed risk report.
+
+All three have a dedicated evaluation harness:
+
+```bash
+python -m scripts.evaluate_retrieval --backend hashing   # or --backend sentence
+python -m scripts.evaluate_comparison --backend hashing  # or --backend sentence
+python -m scripts.evaluate_risk                          # hand-labeled rule precision
+```
+
+`evaluate_retrieval.py` and `evaluate_comparison.py` score against the same
+committed `data/cuad_sample.json` fixture used for classification (retrieval
+via leave-one-out same-category recall; comparison via synthetic, controlled
+edits since no public labeled contract-diff dataset exists). `evaluate_risk.py`
+scores against `data/risk_eval_labels.json`, a hand-labeled fixture — see that
+file's construction notes for what's real CUAD-derived text versus
+hand-authored representative legal language.
+
 ## Datasets
 
 - **CUAD** (Contract Understanding Atticus Dataset) — clause categories and

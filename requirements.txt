@@ -17,6 +17,15 @@ python-docx>=1.1
 transformers>=4.40
 torch>=2.2
 
+# Semantic retrieval embedding backend (Checkpoint 3). Imported lazily in
+# app/retrieval/embedder.py; the HashingEmbedder fallback works without it.
+sentence-transformers>=3.0
+
+# Optimal clause alignment for contract comparison (Checkpoint 3). Imported
+# in app/comparison/comparator.py.
+scipy>=1.13
+numpy>=1.26
+
 # Testing
 pytest>=8.0
 

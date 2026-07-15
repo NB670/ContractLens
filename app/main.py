@@ -15,13 +15,19 @@ from __future__ import annotations
 
 import html
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
 
+from app.comparison.comparator import compare_contracts
 from app.config import settings
 from app.ingestion.parsers import UnsupportedFormatError, detect_format
+from app.models.contract import Contract
 from app.pipeline import ingest
+from app.retrieval.index import ClauseIndex
+from app.risk.analyzer import analyze_risk
 from app.store import store
+
+_clause_index = ClauseIndex()
 
 app = FastAPI(
     title="ContractLens",
@@ -40,9 +46,18 @@ def root() -> dict:
     }
 
 
-@app.post("/upload")
-async def upload_contract(file: UploadFile = File(...)) -> dict:
-    """Upload and structure a contract."""
+async def _ingest_upload(file: UploadFile) -> Contract:
+    """Validate an uploaded file and run it through the ingestion pipeline.
+
+    Shared by ``/upload`` and ``/compare`` so both enforce identical format,
+    empty-file, and size checks and surface the same HTTP error codes. Also
+    feeds the shared retrieval index so any ingested contract -- via either
+    endpoint -- becomes searchable immediately.
+
+    Note: documents uploaded via ``/compare`` are persisted and indexed just
+    like ``/upload`` uploads -- they are not treated as ephemeral. That is an
+    intentional simplicity choice at this project's scale, not an oversight.
+    """
     filename = file.filename or "upload"
     try:
         detect_format(filename)
@@ -63,6 +78,14 @@ async def upload_contract(file: UploadFile = File(...)) -> dict:
         # Missing optional parser dependency (pypdf / python-docx).
         raise HTTPException(status_code=501, detail=str(exc)) from exc
 
+    _clause_index.add_contract(contract)
+    return contract
+
+
+@app.post("/upload")
+async def upload_contract(file: UploadFile = File(...)) -> dict:
+    """Upload and structure a contract."""
+    contract = await _ingest_upload(file)
     return {
         "id": contract.id,
         "filename": contract.filename,
@@ -71,6 +94,22 @@ async def upload_contract(file: UploadFile = File(...)) -> dict:
         "categories": contract.categories_present(),
         "clauses": [c.model_dump() for c in contract.clauses],
     }
+
+
+@app.on_event("startup")
+def _load_existing_contracts_into_index() -> None:
+    """Populate the in-memory retrieval index from persisted contracts.
+
+    The SQLite store survives a restart; the in-memory ``ClauseIndex`` does
+    not, so every already-stored contract is re-embedded once at startup.
+
+    This synchronous re-embedding cost grows with the store's size, which is
+    acceptable at this project's scale but would need to move to lazy or
+    background indexing before running against a production-sized store.
+    """
+    contracts = [c for c in (store.get(cid) for cid in store.list_ids()) if c is not None]
+    for contract in contracts:
+        _clause_index.add_contract(contract)
 
 
 @app.get("/contracts/{contract_id}")
@@ -125,3 +164,60 @@ pre {{ white-space: pre-wrap; background: #f7f7f7; padding: .5rem; }}
 <h2>Clauses</h2>
 {''.join(clause_blocks) or '<p>No clauses detected.</p>'}
 </body></html>"""
+
+
+# --------------------------------------------------------------------------- #
+# Checkpoint 3 -- semantic retrieval
+# --------------------------------------------------------------------------- #
+@app.get("/search")
+def search_clauses(
+    q: str = Query(..., description="Natural-language / clause-text query"),
+    k: int = Query(5, ge=1, le=50),
+    category: str | None = Query(None, description="Restrict to one category"),
+) -> dict:
+    """Semantic search for clauses across all uploaded contracts."""
+    hits = _clause_index.search(q, k=k, category=category)
+    return {"query": q, "k": k, "count": len(hits), "hits": [h.model_dump() for h in hits]}
+
+
+@app.get("/contracts/{contract_id}/similar/{clause_index}")
+def similar_clauses(
+    contract_id: str, clause_index: int, k: int = Query(5, ge=1, le=50)
+) -> dict:
+    """Find clauses (in any contract) similar to one clause of a contract."""
+    if store.get(contract_id) is None:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    hits = _clause_index.most_similar_to(contract_id, clause_index, k=k)
+    return {
+        "contract_id": contract_id,
+        "clause_index": clause_index,
+        "count": len(hits),
+        "hits": [h.model_dump() for h in hits],
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Checkpoint 3 -- contract comparison
+# --------------------------------------------------------------------------- #
+@app.post("/compare")
+async def compare_uploaded_contracts(
+    base: UploadFile = File(..., description="Base contract / template"),
+    revised: UploadFile = File(..., description="Revised / counterparty contract"),
+) -> dict:
+    """Upload two contracts and return a clause-level semantic diff."""
+    base_contract = await _ingest_upload(base)
+    revised_contract = await _ingest_upload(revised)
+    diff = compare_contracts(base_contract, revised_contract)
+    return diff.model_dump()
+
+
+# --------------------------------------------------------------------------- #
+# Checkpoint 3 -- risk analysis
+# --------------------------------------------------------------------------- #
+@app.get("/contracts/{contract_id}/risk")
+def contract_risk(contract_id: str) -> dict:
+    """Return an evidence-backed risk report for a stored contract."""
+    contract = store.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    return analyze_risk(contract).model_dump()
