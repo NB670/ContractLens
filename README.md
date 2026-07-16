@@ -36,6 +36,11 @@ locally so that privacy-sensitive contracts never have to leave the user's machi
 - A **CUAD-based evaluation harness** that scores both classifier backends
   against real labeled CUAD data with precision/recall/F1
   (`scripts/evaluate_clauses.py`, `data/cuad_sample.json`).
+- **Semantic clause retrieval** (`app/retrieval/`) — `GET /search`,
+  `GET /contracts/{id}/similar/{clause_index}` — see "Checkpoint 3" below.
+- **Contract comparison** (`app/comparison/`) via optimal clause alignment —
+  `POST /compare`.
+- **Evidence-backed risk analysis** (`app/risk/`) — `GET /contracts/{id}/risk`.
 
 ## Architecture
 
@@ -59,7 +64,7 @@ contract file ──▶ parsers ──▶ raw text
 
 ```
 app/
-  main.py                  FastAPI app + routes (/upload, /contracts/{id}, /contracts/{id}/view)
+  main.py                  FastAPI app + routes (upload/view, search/similar, compare, risk)
   config.py                 runtime configuration (env vars below)
   pipeline.py                parse -> segment -> classify -> store orchestration;
                               contract-type and party detection
@@ -72,12 +77,24 @@ app/
     classifier.py               rule-based + LegalBERT (embedding + cosine similarity) classifiers
   models/
     contract.py                 Contract / Clause data models
+    analysis.py                  RetrievalHit / ClauseChange / ContractDiff / RiskFinding / RiskReport models
+  retrieval/
+    embedder.py                 hashing + sentence-transformers embedding backends
+    index.py                     in-memory cosine ClauseIndex
+  comparison/
+    comparator.py                optimal (Hungarian-algorithm) clause alignment
+  risk/
+    analyzer.py                  regex-based risk rule engine with evidence offsets
 scripts/
   generate_cuad_sample.py    one-time generator for data/cuad_sample.json
   evaluate_clauses.py         scores both classifiers against data/cuad_sample.json
+  evaluate_retrieval.py       Recall@K / Success@K / MRR against data/cuad_sample.json
+  evaluate_comparison.py      precision/recall/F1 against synthetic, controlled edits
+  evaluate_risk.py            rule precision against data/risk_eval_labels.json
 data/
   sample_contract.txt        tiny sample for local smoke testing
   cuad_sample.json            350 labeled clauses sampled from CUAD (7 categories)
+  risk_eval_labels.json       30 hand-labeled clauses for risk-rule precision eval
 tests/
   test_segmenter.py
   test_parsers.py
@@ -85,6 +102,12 @@ tests/
   test_pipeline.py
   test_store.py
   test_evaluate_clauses.py
+  test_retrieval.py
+  test_evaluate_retrieval.py
+  test_comparison.py
+  test_evaluate_comparison.py
+  test_risk.py
+  test_evaluate_risk.py
 requirements.txt
 ```
 
@@ -182,6 +205,35 @@ scores against `data/risk_eval_labels.json`, a hand-labeled fixture — see that
 file's construction notes for what's real CUAD-derived text versus
 hand-authored representative legal language.
 
+### Trying the Checkpoint 3 endpoints
+
+With the server running (`uvicorn app.main:app --reload`) and at least one
+contract uploaded (`POST /upload` with `data/sample_contract.txt`, as above):
+
+```bash
+# Semantic search across every uploaded contract's clauses
+curl -s "http://127.0.0.1:8000/search?q=confidentiality+obligations&k=3" | python3 -m json.tool
+
+# Clauses similar to one specific clause (substitute a real id and clause_index
+# from the /upload response or GET /contracts/{id})
+curl -s "http://127.0.0.1:8000/contracts/<id>/similar/0?k=3" | python3 -m json.tool
+
+# Evidence-backed risk report for a stored contract
+curl -s "http://127.0.0.1:8000/contracts/<id>/risk" | python3 -m json.tool
+
+# Compare two contracts (two separate file uploads in one request)
+curl -s -X POST http://127.0.0.1:8000/compare \
+  -F "base=@data/sample_contract.txt" \
+  -F "revised=@data/sample_contract.txt" \
+  | python3 -m json.tool
+```
+
+All four are also browsable via the Swagger UI at `/docs` ("Try it out" on
+each route). Note: uploads made through `/compare` are persisted and indexed
+for search exactly like `/upload` uploads — this project treats every
+ingested document as first-class, not ephemeral, at this scale (see
+`app/main.py`'s `_ingest_upload` docstring).
+
 ## Datasets
 
 - **CUAD** (Contract Understanding Atticus Dataset) — clause categories and
@@ -192,7 +244,5 @@ hand-authored representative legal language.
 
 ## Roadmap
 
-- Semantic retrieval and contract comparison.
-- Risk reporting backed by supporting evidence.
-- ContractLens UI and local-LLM chatbot integration, with benchmark evaluation
-  (Recall@K, MRR) for retrieval.
+- ContractLens UI and local-LLM chatbot integration (question answering over
+  uploaded contracts).

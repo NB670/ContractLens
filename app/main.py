@@ -31,8 +31,8 @@ _clause_index = ClauseIndex()
 
 app = FastAPI(
     title="ContractLens",
-    description="Privacy-preserving contract intelligence platform (CP2: ingestion + clause intelligence)",
-    version="0.2.0",
+    description="Privacy-preserving contract intelligence platform (CP3: retrieval, comparison, and risk analysis)",
+    version="0.3.0",
 )
 
 
@@ -40,7 +40,7 @@ app = FastAPI(
 def root() -> dict:
     return {
         "service": "ContractLens",
-        "checkpoint": 2,
+        "checkpoint": 3,
         "supported_formats": list(settings.supported_extensions),
         "classifier_backend": settings.classifier_backend,
     }
