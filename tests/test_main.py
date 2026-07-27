@@ -13,6 +13,8 @@ under test.
 """
 
 import io
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 
 import pytest
 from fastapi.testclient import TestClient
@@ -108,3 +110,45 @@ def test_report_route_404s_for_unknown_contract():
     with TestClient(app) as client:
         resp = client.get("/contracts/does-not-exist/report.json")
     assert resp.status_code == 404
+
+
+def test_chat_raises_clear_error_when_mcp_client_fails_to_start(monkeypatch):
+    """A start() failure must surface as an error, not hang forever.
+
+    Regression test for a bug caught in review: app.main's _mcp_supervisor
+    previously only called `ready.set()` on the *success* path of
+    `_mcp_client.start()`, so if start() ever raised (subprocess spawn
+    failure, bad path, resource exhaustion, ...) every caller of
+    `_ensure_mcp_started()` -- both /chat and the /report routes -- would
+    hang forever on `await _mcp_ready.wait()` instead of getting a clear
+    failure. The fix stores the exception in `_mcp_start_error`, always sets
+    `ready` in a `finally`, and has `_ensure_mcp_started()` re-raise it.
+
+    This patches `MCPToolClient.start` on the shared `_mcp_client` singleton
+    to raise, then hits /chat (no contract upload needed, and the autouse
+    fixture above already keeps it on ExtractiveBackend so no LLM load is
+    involved) inside a worker thread with a hard join timeout -- so if this
+    regresses to a hang, this test fails fast instead of freezing the whole
+    suite.
+    """
+
+    async def _broken_start() -> None:
+        raise RuntimeError("simulated MCP subprocess spawn failure")
+
+    monkeypatch.setattr(main_module._mcp_client, "start", _broken_start)
+
+    def _make_request():
+        with TestClient(app) as client:
+            return client.post("/chat", json={"question": "What is the notice period?"})
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_make_request)
+        try:
+            resp = future.result(timeout=10)
+        except FutureTimeoutError:
+            pytest.fail("chat route hung instead of surfacing the start() failure")
+        except RuntimeError as exc:
+            assert "simulated MCP subprocess spawn failure" in str(exc)
+            return
+
+    assert resp.status_code == 500

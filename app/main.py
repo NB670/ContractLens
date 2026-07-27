@@ -41,6 +41,7 @@ _assistant = build_default_assistant(_mcp_client)
 _mcp_supervisor_task: asyncio.Task | None = None
 _mcp_ready: asyncio.Event | None = None
 _mcp_stop_signal: asyncio.Event | None = None
+_mcp_start_error: BaseException | None = None
 
 app = FastAPI(
     title="ContractLens",
@@ -81,11 +82,24 @@ async def _mcp_supervisor(ready: asyncio.Event, stop_signal: asyncio.Event) -> N
     created lazily on first use, parked on `stop_signal` in between --
     keeps start() and stop() in the same Task no matter which request
     Task kicked things off.
+
+    If `_mcp_client.start()` itself raises (subprocess spawn failure, bad
+    path, resource exhaustion, ...), that exception is stashed in the
+    module-level `_mcp_start_error` and `ready` is still set (in `finally`)
+    so every caller parked on `_ensure_mcp_started()`'s `await
+    _mcp_ready.wait()` wakes up instead of hanging forever -- `stop_signal`
+    is never waited on in that case since there is nothing running to stop.
     """
-    await _mcp_client.start()
-    ready.set()
-    await stop_signal.wait()
-    await _mcp_client.stop()
+    global _mcp_start_error
+    try:
+        await _mcp_client.start()
+    except BaseException as exc:  # noqa: BLE001 -- must unblock waiters on *any* failure
+        _mcp_start_error = exc
+    finally:
+        ready.set()
+    if _mcp_start_error is None:
+        await stop_signal.wait()
+        await _mcp_client.stop()
 
 
 async def _ensure_mcp_started() -> None:
@@ -94,13 +108,23 @@ async def _ensure_mcp_started() -> None:
     Routes that never touch chat/report never call this, so they pay no
     subprocess cost -- the laziness the original design intended is
     preserved; only *how* the start happens changes (see _mcp_supervisor).
+
+    Re-raises the supervisor's start() failure (if any) to the caller
+    instead of leaving it to hang, and clears `_mcp_supervisor_task` so the
+    *next* call gets a fresh attempt rather than being permanently wedged
+    against a dead supervisor.
     """
-    global _mcp_supervisor_task, _mcp_ready, _mcp_stop_signal
+    global _mcp_supervisor_task, _mcp_ready, _mcp_stop_signal, _mcp_start_error
     if _mcp_supervisor_task is None:
         _mcp_ready = asyncio.Event()
         _mcp_stop_signal = asyncio.Event()
+        _mcp_start_error = None
         _mcp_supervisor_task = asyncio.create_task(_mcp_supervisor(_mcp_ready, _mcp_stop_signal))
     await _mcp_ready.wait()
+    if _mcp_start_error is not None:
+        error, _mcp_start_error = _mcp_start_error, None
+        _mcp_supervisor_task = None
+        raise error
 
 
 @app.on_event("shutdown")
@@ -113,15 +137,20 @@ async def _stop_mcp_client() -> None:
     that to finish, then resets the module globals so a later app restart
     (e.g. the next `with TestClient(app) as client:` block in
     tests/test_main.py) starts a fresh supervisor instead of reusing a
-    torn-down one.
+    torn-down one. The reset happens in `finally` so a supervisor Task that
+    ended via an exception (e.g. a start() failure that was already
+    re-raised to its caller) still leaves clean state behind, rather than
+    wedging every later app lifespan against stale globals.
     """
     global _mcp_supervisor_task, _mcp_ready, _mcp_stop_signal
     if _mcp_supervisor_task is not None:
         _mcp_stop_signal.set()
-        await _mcp_supervisor_task
-        _mcp_supervisor_task = None
-        _mcp_ready = None
-        _mcp_stop_signal = None
+        try:
+            await _mcp_supervisor_task
+        finally:
+            _mcp_supervisor_task = None
+            _mcp_ready = None
+            _mcp_stop_signal = None
 
 
 @app.get("/", response_class=HTMLResponse)
