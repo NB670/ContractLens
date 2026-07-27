@@ -110,9 +110,19 @@ async def _ensure_mcp_started() -> None:
     preserved; only *how* the start happens changes (see _mcp_supervisor).
 
     Re-raises the supervisor's start() failure (if any) to the caller
-    instead of leaving it to hang, and clears `_mcp_supervisor_task` so the
-    *next* call gets a fresh attempt rather than being permanently wedged
+    instead of leaving it to hang, and clears `_mcp_supervisor_task` so a
+    *later* call gets a fresh attempt rather than being permanently wedged
     against a dead supervisor.
+
+    Concurrency note: if two callers are both parked on `_mcp_ready.wait()`
+    when start() fails, both wake up once `ready` is set, and both must see
+    the failure -- not just whichever runs first. So `_mcp_start_error` is
+    read into a local (`error`) rather than popped/cleared, and only the
+    caller that still finds `_mcp_supervisor_task` pointing at *this*
+    attempt's Task resets it to `None` -- avoiding a race where the first
+    caller's reset makes a second, concurrent caller (or a call from within
+    the same failed attempt) read back `None` and silently proceed as if
+    the client had started.
     """
     global _mcp_supervisor_task, _mcp_ready, _mcp_stop_signal, _mcp_start_error
     if _mcp_supervisor_task is None:
@@ -120,10 +130,12 @@ async def _ensure_mcp_started() -> None:
         _mcp_stop_signal = asyncio.Event()
         _mcp_start_error = None
         _mcp_supervisor_task = asyncio.create_task(_mcp_supervisor(_mcp_ready, _mcp_stop_signal))
+    supervisor_task = _mcp_supervisor_task
     await _mcp_ready.wait()
-    if _mcp_start_error is not None:
-        error, _mcp_start_error = _mcp_start_error, None
-        _mcp_supervisor_task = None
+    error = _mcp_start_error
+    if error is not None:
+        if _mcp_supervisor_task is supervisor_task:
+            _mcp_supervisor_task = None
         raise error
 
 

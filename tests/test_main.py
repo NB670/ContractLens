@@ -12,6 +12,7 @@ which is unnecessary given the extractive-backend path is what's actually
 under test.
 """
 
+import asyncio
 import io
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -152,3 +153,46 @@ def test_chat_raises_clear_error_when_mcp_client_fails_to_start(monkeypatch):
             return
 
     assert resp.status_code == 500
+
+
+async def test_ensure_mcp_started_raises_for_every_concurrent_caller_on_failure(monkeypatch):
+    """Two concurrent callers racing a start() failure must both see it.
+
+    Regression test for a second bug caught in review, on top of the
+    original hang fix above: the first version of that fix read
+    `_mcp_start_error` via a pop-and-clear (`error, _mcp_start_error =
+    _mcp_start_error, None`), so as soon as *one* concurrent caller of
+    `_ensure_mcp_started()` observed the failure it wiped the shared
+    variable out from under any other caller waking on the same `ready`
+    Event -- that second caller would then read back `None` and silently
+    return as if the MCP client had started, instead of raising. The fix
+    reads `_mcp_start_error` into a local per call without clearing the
+    shared variable, so every waiter on a given failed attempt sees the
+    same error object.
+
+    Drives `_ensure_mcp_started()` directly (rather than through two real
+    HTTP requests) via `asyncio.gather` so both calls are genuinely
+    in-flight -- both past their `await _mcp_ready.wait()` -- before the
+    patched start() fails and wakes both at once; wraps the whole thing in
+    `asyncio.wait_for(..., timeout=5)` so a regression to a hang fails this
+    test fast instead of freezing the suite.
+    """
+
+    async def _broken_start() -> None:
+        raise RuntimeError("simulated concurrent MCP subprocess spawn failure")
+
+    monkeypatch.setattr(main_module._mcp_client, "start", _broken_start)
+
+    async def _gather_both():
+        return await asyncio.gather(
+            main_module._ensure_mcp_started(),
+            main_module._ensure_mcp_started(),
+            return_exceptions=True,
+        )
+
+    results = await asyncio.wait_for(_gather_both(), timeout=5)
+
+    assert len(results) == 2
+    for result in results:
+        assert isinstance(result, RuntimeError), f"expected both callers to raise, got {result!r}"
+        assert "simulated concurrent MCP subprocess spawn failure" in str(result)
