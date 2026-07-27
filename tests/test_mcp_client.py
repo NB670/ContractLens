@@ -72,19 +72,43 @@ async def test_call_tool_raises_mcp_tool_error_for_unknown_tool(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_start_failure_does_not_leak_or_leave_partial_state():
+async def test_start_failure_closes_the_partial_stack(monkeypatch):
     # This command exits immediately without ever speaking the MCP
     # handshake, so stdio_client/ClientSession entry succeeds but
     # session.initialize() never gets a response and fails. start() must
     # close the partially-entered AsyncExitStack in that case instead of
-    # leaking the spawned subprocess, and must leave _stack/_session unset
-    # so a later call doesn't think the client is already started.
+    # leaking the spawned subprocess.
+    #
+    # Just asserting client._stack/_session are None afterward is NOT
+    # sufficient: those attributes are only assigned after the try block
+    # succeeds in both the buggy and the fixed version of start(), so that
+    # assertion alone passes identically whether or not stack.aclose() was
+    # ever called. Spy on AsyncExitStack.aclose to actually observe that
+    # teardown of the partially-entered stack happened.
+    from contextlib import AsyncExitStack
+
+    aclose_calls = []
+    original_aclose = AsyncExitStack.aclose
+
+    async def spy_aclose(self):
+        aclose_calls.append(self)
+        return await original_aclose(self)
+
+    monkeypatch.setattr(AsyncExitStack, "aclose", spy_aclose)
+
     client = MCPToolClient(command=["python3", "-c", "import sys; sys.exit(1)"])
     with pytest.raises(Exception):
         await client.start()
 
+    # In this mcp version, closing our stack cascades into the ClientSession's
+    # own internal AsyncExitStack (also patched, since the spy is installed on
+    # the class), so the fixed code observably closes >=1 stacks; the buggy
+    # code (verified locally by temporarily reverting the try/except in
+    # app/mcp/client.py) closes exactly 0, since nothing ever calls
+    # stack.aclose() on the path where initialize() raises.
+    assert len(aclose_calls) >= 1
     assert client._stack is None
     assert client._session is None
 
-    # stop() after a failed start() must be a no-op, not raise.
+    # stop() after a failed start() must still be a safe no-op.
     await client.stop()
