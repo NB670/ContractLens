@@ -14,6 +14,7 @@ under test.
 
 import asyncio
 import io
+import os
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
@@ -23,6 +24,9 @@ from fastapi.testclient import TestClient
 import app.main as main_module
 from app.chat.assistant import ExtractiveBackend
 from app.main import app
+from app.mcp.client import MCPToolClient
+from app.models.contract import Clause, Contract
+from app.store import ContractStore
 
 
 @pytest.fixture(autouse=True)
@@ -196,3 +200,98 @@ async def test_ensure_mcp_started_raises_for_every_concurrent_caller_on_failure(
     for result in results:
         assert isinstance(result, RuntimeError), f"expected both callers to raise, got {result!r}"
         assert "simulated concurrent MCP subprocess spawn failure" in str(result)
+
+
+def _contract_with_clause(cid: str, text: str, category: str) -> Contract:
+    clause = Clause(
+        index=0, heading=None, text=text, category=category, confidence=1.0,
+        start_offset=0, end_offset=len(text),
+    )
+    return Contract(id=cid, filename=f"{cid}.txt", source_format="txt", clauses=[clause])
+
+
+@pytest.mark.asyncio
+async def test_mcp_subprocess_inherits_custom_contractlens_db_path(monkeypatch, tmp_path):
+    """Regression test: the MCP server subprocess must see the same custom
+    CONTRACTLENS_DB_PATH as the main process, not silently fall back to the
+    store.py default.
+
+    Bug being guarded against: mcp's stdio_client does NOT fully inherit the
+    parent process's environment when MCPToolClient is constructed with
+    env=None (the mcp SDK only forwards a small safe allowlist like PATH/
+    HOME). app/main.py used to do exactly `MCPToolClient()` with no env, so
+    if CONTRACTLENS_DB_PATH were set to a custom path for the main process,
+    the subprocess's own ContractStore singleton would read that env var
+    fresh in its own process, get nothing, and silently open the *default*
+    "contractlens.db" instead -- a different, effectively-empty file. /chat
+    and /report would then see zero clauses even though a contract was
+    successfully uploaded and persisted at the custom path.
+
+    This test proves the fix (app/main.py now explicitly passes
+    env={"CONTRACTLENS_DB_PATH": os.environ.get(...)} when constructing
+    _mcp_client) actually works, by exercising the same construction here:
+      1. Set CONTRACTLENS_DB_PATH to a custom temp-file path.
+      2. Build an MCPToolClient exactly as app/main.py's module-level code
+         does: env={"CONTRACTLENS_DB_PATH": os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")}.
+      3. Write a contract directly into a ContractStore pointed at that same
+         custom path (bypassing the shared app.store.store singleton, since
+         this test process and the server subprocess are different OS
+         processes -- same isolation technique as tests/test_mcp_client.py).
+      4. Call search_clauses through the client and assert the contract is
+         found.
+
+    This is not tautological because the test also drives the contrast case
+    (below) side by side, within the same custom-env process: a second
+    MCPToolClient constructed the old buggy way -- MCPToolClient(env=None),
+    i.e. exactly `MCPToolClient()` as app/main.py used to call it -- talking
+    to the SAME custom CONTRACTLENS_DB_PATH the test process has set. If the
+    fix's env-passthrough weren't actually doing anything, both clients
+    would behave identically; instead the env=None client's subprocess falls
+    back to the default "contractlens.db" and finds nothing, while the
+    env=<passthrough> client's subprocess opens the custom file and finds
+    the clause. That divergence is the actual proof the fix works, not just
+    that search_clauses works in general.
+    """
+    custom_db_path = tmp_path / "custom-cp4-followup.db"
+    monkeypatch.setenv("CONTRACTLENS_DB_PATH", str(custom_db_path))
+
+    contract_id = "cp4-followup-1"
+    ContractStore(database_url=f"sqlite:///{custom_db_path}").add(
+        _contract_with_clause(
+            contract_id,
+            "The parties agree to a governing law of Delaware for this agreement.",
+            "Governing Law",
+        )
+    )
+
+    # Contrast case: the OLD buggy construction app/main.py used to use (no
+    # env passed at all). Its subprocess does NOT inherit
+    # CONTRACTLENS_DB_PATH from this process and falls back to whatever
+    # store.py's default "contractlens.db" resolves to in the subprocess's
+    # cwd (which may be a real, pre-existing dev database with unrelated
+    # contracts in it -- so this asserts our specific contract is absent
+    # from the results, not that there are zero hits, keeping the check
+    # deterministic regardless of what else is in that default file).
+    buggy_client = MCPToolClient()
+    try:
+        buggy_result = await buggy_client.call_tool("search_clauses", query="governing law", k=5)
+        found_ids = {hit["contract_id"] for hit in buggy_result["hits"]}
+        assert contract_id not in found_ids, (
+            "the env=None client unexpectedly found our contract -- this test's "
+            "contrast case is broken, or CONTRACTLENS_DB_PATH is leaking through "
+            "some other channel"
+        )
+    finally:
+        await buggy_client.stop()
+
+    # Fixed case: mirrors app/main.py's current module-level construction
+    # exactly.
+    client = MCPToolClient(
+        env={"CONTRACTLENS_DB_PATH": os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")}
+    )
+    try:
+        result = await client.call_tool("search_clauses", query="governing law", k=5)
+        assert result["hits"], "subprocess did not find the clause -- it likely opened the wrong db file"
+        assert result["hits"][0]["contract_id"] == "cp4-followup-1"
+    finally:
+        await client.stop()

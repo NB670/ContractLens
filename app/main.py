@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
@@ -33,7 +34,21 @@ from app.risk.analyzer import analyze_risk
 from app.store import store
 
 _clause_index = ClauseIndex()
-_mcp_client = MCPToolClient()
+# env is passed explicitly (rather than left as MCPToolClient's default None)
+# because the mcp SDK's stdio_client does NOT fully inherit the parent
+# process's environment when env=None -- it only forwards a small safe
+# allowlist (PATH, HOME, etc.), silently dropping app-specific vars like
+# CONTRACTLENS_DB_PATH. Without this, a custom CONTRACTLENS_DB_PATH set for
+# this (main) process would not reach the app/mcp/server.py subprocess,
+# which would then fall back to store.py's default "contractlens.db" --  a
+# different file than the one this process's `store` singleton actually
+# opened -- so /chat and /report would silently see an empty store even
+# though contracts were uploaded successfully. Resolving the value here
+# (mirroring app/store.py's own default) guarantees both processes agree on
+# the same SQLite file regardless of whether the env var was customized.
+_mcp_client = MCPToolClient(
+    env={"CONTRACTLENS_DB_PATH": os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")}
+)
 _assistant = build_default_assistant(_mcp_client)
 
 # MCPToolClient.start()/stop() lifecycle: see _ensure_mcp_started()/_stop_mcp_client()
