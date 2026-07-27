@@ -26,6 +26,10 @@ sentence-transformers>=3.0
 scipy>=1.13
 numpy>=1.26
 
+# MCP server for the CP4 chatbot / report tool integrations. Imported in
+# app/mcp/server.py (FastMCP) and app/mcp/client.py (ClientSession).
+mcp>=1.28
+
 # Testing
 pytest>=8.0
 

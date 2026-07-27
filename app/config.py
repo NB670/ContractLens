@@ -35,5 +35,19 @@ class Settings:
         "CONTRACTLENS_RETRIEVAL_MODEL", "all-MiniLM-L6-v2"
     )
 
+    # Chatbot answer backend (Checkpoint 4): "local" (default; a local
+    # transformers text-generation model, with an extractive fallback if the
+    # dependency/model is unavailable) or "extractive" (dependency-free,
+    # deterministic answers composed from retrieved clauses).
+    chat_backend: str = os.environ.get("CONTRACTLENS_CHAT_BACKEND", "local")
+
+    # Local HuggingFace instruction-tuned model id used when
+    # chat_backend == "local". Small enough to run on CPU; instruction-tuned
+    # so it actually follows the "answer only from these clauses" prompt,
+    # unlike a raw completion model.
+    chat_model: str = os.environ.get(
+        "CONTRACTLENS_CHAT_MODEL", "Qwen/Qwen2.5-0.5B-Instruct"
+    )
+
 
 settings = Settings()
