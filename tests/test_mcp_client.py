@@ -69,3 +69,22 @@ async def test_call_tool_raises_mcp_tool_error_for_unknown_tool(tmp_path):
             await client.call_tool("not_a_real_tool")
     finally:
         await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_failure_does_not_leak_or_leave_partial_state():
+    # This command exits immediately without ever speaking the MCP
+    # handshake, so stdio_client/ClientSession entry succeeds but
+    # session.initialize() never gets a response and fails. start() must
+    # close the partially-entered AsyncExitStack in that case instead of
+    # leaking the spawned subprocess, and must leave _stack/_session unset
+    # so a later call doesn't think the client is already started.
+    client = MCPToolClient(command=["python3", "-c", "import sys; sys.exit(1)"])
+    with pytest.raises(Exception):
+        await client.start()
+
+    assert client._stack is None
+    assert client._session is None
+
+    # stop() after a failed start() must be a no-op, not raise.
+    await client.stop()

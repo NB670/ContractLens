@@ -35,12 +35,20 @@ class MCPToolClient:
         if self._session is not None:
             return
         stack = AsyncExitStack()
-        params = StdioServerParameters(
-            command=self._command[0], args=self._command[1:], env=self._env
-        )
-        read, write = await stack.enter_async_context(stdio_client(params))
-        session = await stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
+        try:
+            params = StdioServerParameters(
+                command=self._command[0], args=self._command[1:], env=self._env
+            )
+            read, write = await stack.enter_async_context(stdio_client(params))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+        except Exception:
+            # If anything after the stack is created raises -- including a
+            # failed handshake in initialize() -- close whatever was already
+            # entered so the subprocess doesn't leak; nothing outside this
+            # method holds a reference to `stack` once the exception unwinds.
+            await stack.aclose()
+            raise
         self._stack = stack
         self._session = session
 
