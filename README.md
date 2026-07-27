@@ -41,6 +41,20 @@ locally so that privacy-sensitive contracts never have to leave the user's machi
 - **Contract comparison** (`app/comparison/`) via optimal clause alignment —
   `POST /compare`.
 - **Evidence-backed risk analysis** (`app/risk/`) — `GET /contracts/{id}/risk`.
+- A **ContractLens dashboard** (`GET /`) — upload form plus a list of stored
+  contracts linking to their view/chat/report pages.
+- A **retrieval-grounded chatbot** (`app/chat/`) backed by a real **MCP
+  server** (`app/mcp/`) — `POST /chat` / `GET /contracts/{id}/chat`. Two
+  answer backends: a small local instruction-tuned LLM
+  (`Qwen/Qwen2.5-0.5B-Instruct`, `app/chat/assistant.py`) with a
+  dependency-free extractive fallback.
+- **Executive report generation** (`app/reports/`) — `GET
+  /contracts/{id}/report` (HTML) / `GET /contracts/{id}/report.json` —
+  contract metadata, clause-category breakdown, and top risk findings, plus
+  an LLM-written (or template) narrative summary.
+- A **consolidated benchmark runner** (`scripts/run_benchmarks.py`) combining
+  the classification and retrieval eval harnesses into one report, writing a
+  timestamped, committed JSON artifact under `results/`.
 
 ## Architecture
 
@@ -64,7 +78,8 @@ contract file ──▶ parsers ──▶ raw text
 
 ```
 app/
-  main.py                  FastAPI app + routes (upload/view, search/similar, compare, risk)
+  main.py                  FastAPI app + routes (dashboard, upload/view, search/similar,
+                             compare, risk, chat, report)
   config.py                 runtime configuration (env vars below)
   pipeline.py                parse -> segment -> classify -> store orchestration;
                               contract-type and party detection
@@ -78,6 +93,8 @@ app/
   models/
     contract.py                 Contract / Clause data models
     analysis.py                  RetrievalHit / ClauseChange / ContractDiff / RiskFinding / RiskReport models
+    chat.py                      ChatRequest / Citation / ChatResponse models
+    report.py                     ExecutiveReport model
   retrieval/
     embedder.py                 hashing + sentence-transformers embedding backends
     index.py                     in-memory cosine ClauseIndex
@@ -85,16 +102,27 @@ app/
     comparator.py                optimal (Hungarian-algorithm) clause alignment
   risk/
     analyzer.py                  regex-based risk rule engine with evidence offsets
+  mcp/
+    server.py                    real MCP server (FastMCP/stdio): search_clauses,
+                                   assess_risk, build_report_data tools
+    client.py                    MCPToolClient — subprocess + ClientSession wrapper
+  chat/
+    assistant.py                 RAG ChatAssistant; ExtractiveBackend + LocalLLMBackend
+  reports/
+    generator.py                 executive report assembly + narrative (LLM or template)
 scripts/
   generate_cuad_sample.py    one-time generator for data/cuad_sample.json
   evaluate_clauses.py         scores both classifiers against data/cuad_sample.json
   evaluate_retrieval.py       Recall@K / Success@K / MRR against data/cuad_sample.json
   evaluate_comparison.py      precision/recall/F1 against synthetic, controlled edits
   evaluate_risk.py            rule precision against data/risk_eval_labels.json
+  run_benchmarks.py           combined classification + retrieval report; writes results/
 data/
   sample_contract.txt        tiny sample for local smoke testing
   cuad_sample.json            350 labeled clauses sampled from CUAD (7 categories)
   risk_eval_labels.json       30 hand-labeled clauses for risk-rule precision eval
+results/
+  benchmark_<timestamp>.json  committed benchmark runs (scripts/run_benchmarks.py)
 tests/
   test_segmenter.py
   test_parsers.py
@@ -108,6 +136,12 @@ tests/
   test_evaluate_comparison.py
   test_risk.py
   test_evaluate_risk.py
+  test_mcp_server.py
+  test_mcp_client.py
+  test_chat.py
+  test_reports.py
+  test_main.py
+  test_run_benchmarks.py
 requirements.txt
 ```
 
@@ -137,6 +171,8 @@ All settings are optional environment variables (see `app/config.py`):
 | `CONTRACTLENS_CLASSIFIER` | `rule` | classifier backend: `rule` or `legalbert` |
 | `CONTRACTLENS_LEGALBERT_MODEL` | `nlpaueb/legal-bert-base-uncased` | HF model id for the LegalBERT backend |
 | `CONTRACTLENS_DB_PATH` | `contractlens.db` | SQLite file path |
+| `CONTRACTLENS_CHAT_BACKEND` | `local` | chat backend: `local` or `extractive` |
+| `CONTRACTLENS_CHAT_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct` | HF model id for the local chat backend |
 
 ## Running the test suite
 
@@ -234,6 +270,68 @@ for search exactly like `/upload` uploads — this project treats every
 ingested document as first-class, not ephemeral, at this scale (see
 `app/main.py`'s `_ingest_upload` docstring).
 
+## Checkpoint 4 — platform, chatbot, and evaluation
+
+Building on the CP3 services, this checkpoint adds a UI, a chatbot, and
+report generation, all going through one real MCP server rather than direct
+function calls:
+
+- **MCP server** (`app/mcp/server.py`) — a `FastMCP` server run as a
+  subprocess over stdio, exposing `search_clauses`, `assess_risk`, and
+  `build_report_data` as real MCP tools. `app/mcp/client.py`'s
+  `MCPToolClient` is the only way the rest of the app reaches these
+  services — the chat assistant and the report generator both go through it.
+- **Chatbot** (`app/chat/assistant.py`) — retrieval-grounded (RAG) question
+  answering with cited clauses. `LocalLLMBackend` uses a small
+  instruction-tuned model (`Qwen/Qwen2.5-0.5B-Instruct` by default) via its
+  chat template, constrained to answer only from retrieved clauses; falls
+  back to a dependency-free `ExtractiveBackend` if the model is unavailable.
+  - `POST /chat` — `{"question": ..., "contract_id": ..., "k": 5}` → a cited
+    answer.
+  - `GET /contracts/{id}/chat` — minimal browser chat UI.
+- **Executive reports** (`app/reports/generator.py`) — contract metadata,
+  clause-category breakdown, and top risk findings, with a short narrative
+  (LLM-written when available, otherwise a deterministic template sentence).
+  - `GET /contracts/{id}/report` — HTML view.
+  - `GET /contracts/{id}/report.json` — the underlying structured data.
+- **Dashboard** (`GET /`) — upload form + list of stored contracts, linking
+  to each contract's view/chat/report pages.
+
+### Trying the Checkpoint 4 endpoints
+
+With the server running (`uvicorn app.main:app --reload`) and at least one
+contract uploaded:
+
+```bash
+# Ask a grounded, cited question about one contract (substitute a real id)
+curl -s -X POST http://127.0.0.1:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are the confidentiality obligations?", "contract_id": "<id>"}' \
+  | python3 -m json.tool
+
+# Executive report for a stored contract
+curl -s "http://127.0.0.1:8000/contracts/<id>/report.json" | python3 -m json.tool
+```
+
+Both are also usable from the browser: `/` for the dashboard,
+`/contracts/<id>/chat` for the chat UI, `/contracts/<id>/report` for the HTML
+report. Note: the local LLM backend downloads `Qwen/Qwen2.5-0.5B-Instruct`
+(~1GB) on first use; set `CONTRACTLENS_CHAT_BACKEND=extractive` to skip that
+entirely and get deterministic, clause-composed answers instead.
+
+### Benchmarking classification and retrieval
+
+```bash
+python -m scripts.run_benchmarks                       # rule + hashing, writes results/
+python -m scripts.run_benchmarks --classifier legalbert --retrieval-backend sentence
+python -m scripts.run_benchmarks --out ""               # skip writing a results file
+```
+
+Prints a combined classification + retrieval report and writes a timestamped
+JSON summary to `results/` by default, so the headline numbers are
+reproducible directly from the repository rather than living only in report
+screenshots.
+
 ## Datasets
 
 - **CUAD** (Contract Understanding Atticus Dataset) — clause categories and
@@ -244,5 +342,5 @@ ingested document as first-class, not ephemeral, at this scale (see
 
 ## Roadmap
 
-- ContractLens UI and local-LLM chatbot integration (question answering over
-  uploaded contracts).
+- Fine-tuning a small local model on CUAD (e.g. via Georgia Tech PACE) —
+  stretch goal beyond Checkpoint 4.
