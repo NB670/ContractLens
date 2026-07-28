@@ -21,7 +21,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Iterable
 
-from app.clauses.classifier import LegalBertClassifier, RuleBasedClassifier
+from app.clauses.classifier import (
+    FineTunedLegalBertClassifier,
+    LegalBertClassifier,
+    RuleBasedClassifier,
+)
 
 SAMPLE_PATH = Path(__file__).resolve().parents[1] / "data" / "cuad_sample.json"
 
@@ -91,7 +95,11 @@ def print_report(name: str, results: dict[str, dict[str, float]]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=["rule", "legalbert", "both"], default="both")
+    parser.add_argument(
+        "--backend",
+        choices=["rule", "legalbert", "legalbert-finetuned", "both"],
+        default="both",
+    )
     args = parser.parse_args()
 
     records = load_sample()
@@ -107,6 +115,16 @@ def main() -> None:
                 file=sys.stderr,
             )
         print_report("LegalBertClassifier", score(legalbert_classifier, records))
+    if args.backend == "legalbert-finetuned":
+        finetuned_classifier = FineTunedLegalBertClassifier()
+        if not finetuned_classifier._ensure_pipe():
+            print(
+                "WARNING: fine-tuned LegalBERT weights not found (run "
+                "`python -m scripts.finetune_legalbert` first) — results below "
+                "are the RuleBasedClassifier fallback, not a real fine-tuned run.",
+                file=sys.stderr,
+            )
+        print_report("FineTunedLegalBertClassifier", score(finetuned_classifier, records))
 
 
 if __name__ == "__main__":

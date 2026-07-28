@@ -18,12 +18,23 @@ class Settings:
     # File extensions the ingestion layer knows how to parse.
     supported_extensions: tuple[str, ...] = (".pdf", ".docx", ".txt")
 
-    # Clause-classifier backend: "rule" (default, no model download) or "legalbert".
+    # Clause-classifier backend: "rule" (default, no model download),
+    # "legalbert" (zero-shot cosine similarity, no training), or
+    # "legalbert-finetuned" (a real fine-tuned classification head trained
+    # via scripts/finetune_legalbert.py -- see app/clauses/classifier.py's
+    # FineTunedLegalBertClassifier).
     classifier_backend: str = os.environ.get("CONTRACTLENS_CLASSIFIER", "rule")
 
     # HuggingFace model id used when classifier_backend == "legalbert".
     legalbert_model: str = os.environ.get(
         "CONTRACTLENS_LEGALBERT_MODEL", "nlpaueb/legal-bert-base-uncased"
+    )
+
+    # Local directory used when classifier_backend == "legalbert-finetuned".
+    # Produced by `python -m scripts.finetune_legalbert` (gitignored --
+    # weights aren't committed, only the training script is).
+    legalbert_finetuned_dir: str = os.environ.get(
+        "CONTRACTLENS_LEGALBERT_FINETUNED_DIR", "models/legalbert-finetuned/final"
     )
 
     # Retrieval embedding backend: "sentence" (default, semantic) or "hashing"

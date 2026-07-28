@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from app.clauses.classifier import LegalBertClassifier, RuleBasedClassifier, classify_clauses
+from app.clauses.classifier import (
+    FineTunedLegalBertClassifier,
+    LegalBertClassifier,
+    RuleBasedClassifier,
+    classify_clauses,
+)
 from app.ingestion.segmenter import segment
 from app.pipeline import ingest
 
@@ -107,3 +112,25 @@ def test_legalbert_classifier_falls_back_when_model_unavailable():
 
     assert category == "Confidentiality"  # matches RuleBasedClassifier's own behavior
     assert 0.0 < confidence <= 1.0
+
+
+def test_finetuned_legalbert_falls_back_when_no_weights_present():
+    # No fine-tuned model has been trained in this environment (that happens
+    # on a PACE GPU node -- see scripts/finetune_legalbert.py), so this should
+    # hit the "no config.json at model_dir" path and fall back cleanly.
+    classifier = FineTunedLegalBertClassifier(model_dir="/nonexistent/path")
+
+    category, confidence = classifier.classify(
+        "Each party shall hold all Confidential Information in strict confidence."
+    )
+
+    assert category == "Confidentiality"  # matches RuleBasedClassifier's own behavior
+    assert 0.0 < confidence <= 1.0
+    assert classifier._ensure_pipe() is False
+
+
+def test_finetuned_legalbert_empty_text_is_unclassified():
+    classifier = FineTunedLegalBertClassifier(model_dir="/nonexistent/path")
+    category, confidence = classifier.classify("   ")
+    assert category == "Unclassified"
+    assert confidence == 0.0

@@ -1,6 +1,6 @@
 """Consolidated Checkpoint 4 benchmark runner.
 
-Run: python -m scripts.run_benchmarks [--classifier rule|legalbert]
+Run: python -m scripts.run_benchmarks [--classifier rule|legalbert|legalbert-finetuned]
                                       [--retrieval-backend hashing|sentence]
                                       [--k 5] [--limit N] [--json]
                                       [--out results/benchmark_<timestamp>.json]
@@ -25,7 +25,11 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.clauses.classifier import LegalBertClassifier, RuleBasedClassifier
+from app.clauses.classifier import (
+    FineTunedLegalBertClassifier,
+    LegalBertClassifier,
+    RuleBasedClassifier,
+)
 from app.retrieval.embedder import HashingEmbedder, SentenceTransformerEmbedder
 from scripts.evaluate_clauses import load_sample
 from scripts.evaluate_clauses import score as score_classification
@@ -40,6 +44,16 @@ def _make_classifier(name: str):
         if not clf._ensure_embed_fn():
             print(
                 "WARNING: LegalBERT embedding backend unavailable — classification "
+                "numbers are the RuleBasedClassifier fallback.",
+                file=sys.stderr,
+            )
+        return clf
+    if name == "legalbert-finetuned":
+        clf = FineTunedLegalBertClassifier()
+        if not clf._ensure_pipe():
+            print(
+                "WARNING: fine-tuned LegalBERT weights not found (run "
+                "`python -m scripts.finetune_legalbert` first) — classification "
                 "numbers are the RuleBasedClassifier fallback.",
                 file=sys.stderr,
             )
@@ -110,7 +124,9 @@ def _default_out_path() -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--classifier", choices=["rule", "legalbert"], default="rule")
+    parser.add_argument(
+        "--classifier", choices=["rule", "legalbert", "legalbert-finetuned"], default="rule"
+    )
     parser.add_argument("--retrieval-backend", choices=["hashing", "sentence"], default="hashing")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--limit", type=int, default=None, help="Score only the first N clauses (smoke run).")

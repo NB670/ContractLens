@@ -151,10 +151,70 @@ class LegalBertClassifier:
             return self._fallback.classify(text)
 
 
+class FineTunedLegalBertClassifier:
+    """Classifier backed by a fine-tuned LegalBERT sequence-classification head.
+
+    Unlike `LegalBertClassifier` (zero-shot cosine similarity, no training),
+    this loads real fine-tuned weights produced by
+    `scripts/finetune_legalbert.py` from a local directory (default
+    `models/legalbert-finetuned/final`, gitignored -- see that script's
+    docstring for how to produce it, typically on a PACE GPU node).
+
+    Only trained on the 7 CUAD-grounded categories (see
+    `scripts/generate_finetune_dataset.py`); falls back to the rule-based
+    classifier for any input if the fine-tuned weights aren't present, so the
+    pipeline never hard-fails when no fine-tuned model has been trained yet.
+    """
+
+    def __init__(self, model_dir: str | None = None) -> None:
+        self.model_dir = model_dir or settings.legalbert_finetuned_dir
+        self._pipe = None
+        self._load_failed = False
+        self._fallback = RuleBasedClassifier()
+
+    def _ensure_pipe(self) -> bool:
+        if self._pipe is not None:
+            return True
+        if self._load_failed:
+            return False
+        try:  # pragma: no cover - depends on optional heavy deps + trained weights
+            from pathlib import Path
+
+            from transformers import pipeline
+
+            model_path = Path(self.model_dir)
+            if not (model_path / "config.json").exists():
+                self._load_failed = True
+                return False
+            # top_k=None returns every label's score; the model's own config
+            # (set via id2label/label2id at training time -- see
+            # scripts/finetune_legalbert.py) carries real category names, so
+            # no separate labels file is needed to map predictions back.
+            self._pipe = pipeline("text-classification", model=str(model_path), top_k=None)
+            return True
+        except Exception:
+            self._load_failed = True
+            return False
+
+    def classify(self, text: str) -> tuple[str, float]:
+        if not text or not text.strip():
+            return UNCLASSIFIED, 0.0
+        if not self._ensure_pipe():
+            return self._fallback.classify(text)
+        try:
+            scores = self._pipe(text, truncation=True, max_length=256)[0]
+            best = max(scores, key=lambda s: s["score"])
+            return best["label"], round(float(best["score"]), 3)
+        except Exception:
+            return self._fallback.classify(text)
+
+
 def get_classifier():
     """Return the configured classifier instance."""
     if settings.classifier_backend == "legalbert":
         return LegalBertClassifier()
+    if settings.classifier_backend == "legalbert-finetuned":
+        return FineTunedLegalBertClassifier()
     return RuleBasedClassifier()
 
 
