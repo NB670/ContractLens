@@ -1,0 +1,17 @@
+{
+  "held_out_n": 350,
+  "train_n": 560,
+  "val_n": 140,
+  "macro_f1": {
+    "finetuned": 0.966,
+    "rule": 0.646,
+    "zeroshot": 0.554
+  },
+  "files": [
+    "01_macro_f1_comparison.png",
+    "02_per_category_f1.png",
+    "03_training_curves.png",
+    "04_data_split.png",
+    "05_finetuned_precision_recall.png"
+  ]
+}

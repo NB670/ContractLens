@@ -52,6 +52,7 @@ def run(smoke: bool, epochs: int, batch_size: int, lr: float) -> None:
     import torch
     from torch.utils.data import Dataset
     from transformers import (
+        AutoConfig,
         AutoModelForSequenceClassification,
         AutoTokenizer,
         Trainer,
@@ -90,8 +91,12 @@ def run(smoke: bool, epochs: int, batch_size: int, lr: float) -> None:
 
     id2label = {i: label for i, label in enumerate(labels)}
     label2id = {label: i for i, label in enumerate(labels)}
+    config = AutoConfig.from_pretrained(BASE_MODEL)
+    config.num_labels = len(labels)
+    config.id2label = id2label
+    config.label2id = label2id
     model = AutoModelForSequenceClassification.from_pretrained(
-        BASE_MODEL, num_labels=len(labels), id2label=id2label, label2id=label2id
+        BASE_MODEL, config=config, ignore_mismatched_sizes=True
     )
 
     def compute_metrics(eval_pred) -> dict:

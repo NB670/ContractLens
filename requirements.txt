@@ -16,6 +16,8 @@ python-docx>=1.1
 # works without these installed, so a lighter-weight deployment can omit them.
 transformers>=4.40
 torch>=2.2
+accelerate>=1.1.0
+scikit-learn>=1.4
 
 # Semantic retrieval embedding backend (Checkpoint 3). Imported lazily in
 # app/retrieval/embedder.py; the HashingEmbedder fallback works without it.

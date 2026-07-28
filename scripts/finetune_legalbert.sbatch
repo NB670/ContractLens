@@ -1,20 +1,17 @@
 #!/bin/bash
-# SLURM job for scripts/finetune_legalbert.py on Georgia Tech PACE's ICE cluster.
+# SLURM job for scripts/finetune_legalbert.py on Georgia Tech PACE's Phoenix cluster.
 #
-# Before your first real run, verify the placeholders below against your own
-# account (see docs/PACE_FINETUNE.md for exactly how) -- ICE partition/QOS/
-# account names are allocation-specific and a wrong value here fails the job
-# at submission, not mid-run, so it's cheap to get right first.
+# Before your first real run, set --account / --partition / --qos to match
+# your allocation (see docs/PACE_FINETUNE.md). Wrong values fail at submit time.
 
 #SBATCH --job-name=legalbert-finetune
-#SBATCH --account=CHANGE_ME               # `pace-quota` or `sacctmgr show associations user=$USER` lists yours
-#SBATCH --partition=ice-epyc-gpu          # ICE's GPU queue name as of this writing -- confirm with `sinfo -p ice-epyc-gpu`
-#SBATCH --qos=ice-epyc-gpu
-#SBATCH --gres=gpu:A100:1                 # or gpu:A40:1 if A100 has a long queue -- either is enough for this job
+#SBATCH --account=CHANGE_ME                 # `pace-quota` or `sacctmgr show associations user=$USER`
+#SBATCH --partition=gpu-v100                # confirm with `sinfo -p gpu-v100`
+#SBATCH --qos=CHANGE_ME                     # e.g. inferno / embers — check your associations
+#SBATCH --gres=gpu:V100:1                   # V100 is enough; A100 also works if available
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00                   # the real run (560 train / 140 val, 6 epochs) finishes in minutes on a GPU;
-                                           # this ceiling just protects against a hung job, not an expected duration
+#SBATCH --time=01:00:00                     # pip reinstall + training; ceiling protects against hangs
 #SBATCH --output=finetune_legalbert_%j.out
 #SBATCH --error=finetune_legalbert_%j.err
 
@@ -22,15 +19,24 @@ set -euo pipefail
 
 cd "$SLURM_SUBMIT_DIR"
 
-# ICE provides Anaconda via modules; if this module name doesn't exist on
+# Phoenix provides Anaconda via modules; if this module name doesn't exist on
 # your account, run `module avail anaconda` or `module avail python` to find
 # the right one and swap it in.
 module load anaconda3
+module load cuda/12.1 2>/dev/null || true
 
-python -m venv .venv-pace
+if [[ ! -d .venv-pace ]]; then
+  python -m venv .venv-pace
+fi
 source .venv-pace/bin/activate
 pip install --upgrade pip --quiet
+
+# Phoenix cu121 wheels only go up to torch 2.5.x; pin transformers before the
+# torch>=2.6 .bin-loading guard (CVE-2025-32434) so LegalBERT loads work.
+pip install 'torch==2.5.1' --index-url https://download.pytorch.org/whl/cu121 --quiet --force-reinstall
 pip install -r requirements.txt --quiet
+pip install 'transformers==4.48.3' --quiet --force-reinstall
+pip install 'torch==2.5.1' --index-url https://download.pytorch.org/whl/cu121 --quiet --force-reinstall
 
 echo "=== GPU visible to this job ==="
 python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no GPU visible')"
