@@ -18,6 +18,15 @@ contract id present in the store that this process hasn't embedded yet gets
 added once. Already-synced contracts are never re-embedded. At this
 project's corpus size the sync cost is negligible; this is a documented
 tradeoff of the subprocess architecture, not an oversight.
+
+Relatedly: this module's ClauseIndex always uses HashingEmbedder (see
+below), regardless of app/config.py's configured retrieval_backend, which
+the in-process /search endpoint (app/main.py's _clause_index) does honor.
+This is a deliberate split, not drift -- it keeps this subprocess
+dependency-free and avoids loading a second copy of a sentence-transformers
+model purely for chat/report grounding. Revisiting it (e.g. sharing one
+embedder/model across both processes) is a plan-level tradeoff for a future
+checkpoint, not something to change silently here.
 """
 
 from __future__ import annotations

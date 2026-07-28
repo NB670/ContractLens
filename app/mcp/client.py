@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import AsyncExitStack
+from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -24,10 +25,18 @@ class MCPToolError(RuntimeError):
 
 class MCPToolClient:
     def __init__(
-        self, command: list[str] | None = None, env: dict[str, str] | None = None
+        self,
+        command: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        cwd: str | Path | None = None,
     ) -> None:
         self._command = command or [sys.executable, "-m", "app.mcp.server"]
         self._env = env
+        # None preserves the previous, inherited-cwd behavior (the child
+        # process starts in whatever directory this process is in) -- only
+        # set this explicitly when the caller needs the subprocess pinned to
+        # a specific directory regardless of the parent's cwd.
+        self._cwd = cwd
         self._stack: AsyncExitStack | None = None
         self._session: ClientSession | None = None
 
@@ -37,7 +46,10 @@ class MCPToolClient:
         stack = AsyncExitStack()
         try:
             params = StdioServerParameters(
-                command=self._command[0], args=self._command[1:], env=self._env
+                command=self._command[0],
+                args=self._command[1:],
+                env=self._env,
+                cwd=self._cwd,
             )
             read, write = await stack.enter_async_context(stdio_client(params))
             session = await stack.enter_async_context(ClientSession(read, write))

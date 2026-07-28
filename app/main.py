@@ -1,21 +1,35 @@
-"""ContractLens FastAPI application (Checkpoint 2).
+"""ContractLens FastAPI application (Checkpoint 4).
 
 Routes:
-  GET  /                    health / liveness
-  POST /upload              upload a PDF/DOCX/TXT contract, returns structured JSON
-  GET  /contracts/{id}      structured JSON for a previously uploaded contract
-  GET  /contracts/{id}/view minimal HTML clause-visualization view
+  GET  /                            dashboard: upload form + list of stored contracts
+  GET  /health                      health / liveness
+  POST /upload                      upload a PDF/DOCX/TXT contract, returns structured JSON
+  GET  /contracts/{id}              structured JSON for a previously uploaded contract
+  GET  /contracts/{id}/view         minimal HTML clause-visualization view
+  GET  /search                      semantic search for clauses across all contracts
+  GET  /contracts/{id}/similar/{i}  clauses similar to one clause of a contract
+  POST /compare                     upload two contracts, get a clause-level semantic diff
+  GET  /contracts/{id}/risk         evidence-backed risk report
+  POST /chat                        MCP-grounded, cited question answering
+  GET  /contracts/{id}/chat         minimal chat UI
+  GET  /contracts/{id}/report       executive report (HTML)
+  GET  /contracts/{id}/report.json  executive report (JSON)
 
 The view groups clauses by their identified CUAD category and links each clause
 back to its source offsets — the "browse automatically identified clauses /
-highlight relevant section" deliverable for Checkpoint 2.
+highlight relevant section" deliverable for Checkpoint 2. /chat and /report
+are backed by the MCP tool layer (app/mcp/) and return 502 with a clear
+detail message if the MCP subprocess fails to start or a tool call raises,
+rather than surfacing a raw, uninformative 500.
 """
 
 from __future__ import annotations
 
 import asyncio
 import html
+import json
 import os
+from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse
@@ -24,14 +38,16 @@ from app.chat.assistant import LocalLLMBackend, build_default_assistant
 from app.comparison.comparator import compare_contracts
 from app.config import settings
 from app.ingestion.parsers import UnsupportedFormatError, detect_format
-from app.mcp.client import MCPToolClient
+from app.mcp.client import MCPToolClient, MCPToolError
 from app.models.chat import ChatRequest
 from app.models.contract import Contract
 from app.pipeline import ingest
 from app.reports.generator import build_report
 from app.retrieval.index import ClauseIndex
 from app.risk.analyzer import analyze_risk
-from app.store import store
+from app.store import resolve_db_path, store
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _clause_index = ClauseIndex()
 # env is passed explicitly (rather than left as MCPToolClient's default None)
@@ -43,11 +59,23 @@ _clause_index = ClauseIndex()
 # which would then fall back to store.py's default "contractlens.db" --  a
 # different file than the one this process's `store` singleton actually
 # opened -- so /chat and /report would silently see an empty store even
-# though contracts were uploaded successfully. Resolving the value here
-# (mirroring app/store.py's own default) guarantees both processes agree on
-# the same SQLite file regardless of whether the env var was customized.
+# though contracts were uploaded successfully. Resolving the value here (via
+# app.store.resolve_db_path(), the single source of truth store.py's own
+# default is also built from) guarantees both processes agree on the same
+# SQLite file regardless of whether the env var was customized. PYTHONPATH
+# and VIRTUAL_ENV are forwarded too, for the same reason -- the mcp SDK's
+# safe allowlist doesn't include them, so a deployment relying on either
+# (rather than a plain "run uvicorn from the repo root with its venv already
+# on PATH") would otherwise have the subprocess silently fail to `import
+# app...`. cwd is pinned to the repo root explicitly rather than relying on
+# inheriting the parent's cwd, which only happens to work today because
+# `python -m` puts the inherited cwd on sys.path.
 _mcp_client = MCPToolClient(
-    env={"CONTRACTLENS_DB_PATH": os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")}
+    env={
+        "CONTRACTLENS_DB_PATH": resolve_db_path(),
+        **{k: os.environ[k] for k in ("PYTHONPATH", "VIRTUAL_ENV") if k in os.environ},
+    },
+    cwd=_REPO_ROOT,
 )
 _assistant = build_default_assistant(_mcp_client)
 
@@ -407,8 +435,19 @@ async def chat(request: ChatRequest) -> dict:
     """Answer a natural-language question with clauses cited as grounding."""
     if request.contract_id is not None and store.get(request.contract_id) is None:
         raise HTTPException(status_code=404, detail="Contract not found.")
-    await _ensure_mcp_started()
-    response = await _assistant.answer(request.question, contract_id=request.contract_id, k=request.k)
+    try:
+        await _ensure_mcp_started()
+        response = await _assistant.answer(
+            request.question, contract_id=request.contract_id, k=request.k
+        )
+    except (MCPToolError, Exception) as exc:
+        # MCPToolError is itself an Exception, but it's named explicitly here
+        # to document intent: this catches both a raising tool call and an
+        # MCP subprocess start failure (_ensure_mcp_started() re-raises
+        # whatever _mcp_client.start() raised) alike -- a real dependency the
+        # app now needs is unavailable, and a clear 502 beats a silent
+        # partial answer or an opaque 500.
+        raise HTTPException(status_code=502, detail=f"MCP service unavailable: {exc}") from exc
     return response.model_dump()
 
 
@@ -421,6 +460,13 @@ def chat_ui(contract_id: str) -> str:
 
     cid = html.escape(contract_id)
     fname = html.escape(contract.filename)
+    # json.dumps (not Python repr) because this value is embedded directly
+    # into a <script> block: repr() escapes quotes/backslashes but not
+    # "</script>", which would prematurely close the script tag if it ever
+    # appeared in the value. Not currently exploitable (contract ids are
+    # server-generated uuid4 hex and unknown ids 404 before reaching this
+    # template), but this is the safe idiom regardless, at no cost.
+    cid_js = json.dumps(contract_id).replace("</", "<\\/")
     return f"""<!doctype html>
 <html><head><meta charset='utf-8'>
 <title>ContractLens — Chat · {fname}</title>
@@ -447,7 +493,7 @@ button {{ padding: .55rem 1rem; }}
   <button type='submit'>Ask</button>
 </form>
 <script>
-const CID = {contract_id!r};
+const CID = {cid_js};
 const log = document.getElementById('log');
 function esc(s) {{ const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }}
 document.getElementById('f').addEventListener('submit', async (e) => {{
@@ -461,6 +507,11 @@ document.getElementById('f').addEventListener('submit', async (e) => {{
     body: JSON.stringify({{ question: q, contract_id: CID }})
   }});
   const data = await r.json();
+  if (!r.ok) {{
+    log.innerHTML += `<div class='msg bot'><pre>Error: ${{esc(data.detail || ('request failed with status ' + r.status))}}</pre></div>`;
+    log.scrollTop = log.scrollHeight;
+    return;
+  }}
   let cites = (data.citations || []).map((c, i) =>
     `[${{i + 1}}] ${{esc(c.category)}} · clause ${{c.clause_index}} (sim ${{c.score.toFixed(2)}})`
   ).join('<br>');
@@ -486,8 +537,11 @@ def _report_llm_backend() -> LocalLLMBackend | None:
 
 @app.get("/contracts/{contract_id}/report.json")
 async def contract_report_json(contract_id: str) -> dict:
-    await _ensure_mcp_started()
-    report = await build_report(contract_id, _mcp_client, llm_backend=_report_llm_backend())
+    try:
+        await _ensure_mcp_started()
+        report = await build_report(contract_id, _mcp_client, llm_backend=_report_llm_backend())
+    except (MCPToolError, Exception) as exc:
+        raise HTTPException(status_code=502, detail=f"MCP service unavailable: {exc}") from exc
     if report is None:
         raise HTTPException(status_code=404, detail="Contract not found.")
     return report.model_dump()
@@ -495,8 +549,11 @@ async def contract_report_json(contract_id: str) -> dict:
 
 @app.get("/contracts/{contract_id}/report", response_class=HTMLResponse)
 async def contract_report_html(contract_id: str) -> str:
-    await _ensure_mcp_started()
-    report = await build_report(contract_id, _mcp_client, llm_backend=_report_llm_backend())
+    try:
+        await _ensure_mcp_started()
+        report = await build_report(contract_id, _mcp_client, llm_backend=_report_llm_backend())
+    except (MCPToolError, Exception) as exc:
+        raise HTTPException(status_code=502, detail=f"MCP service unavailable: {exc}") from exc
     if report is None:
         raise HTTPException(status_code=404, detail="Contract not found.")
 

@@ -17,6 +17,16 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 from app.models.contract import Contract
 
 
+def resolve_db_path() -> str:
+    """Resolve the SQLite file path both this process and the MCP subprocess must agree on.
+
+    Single source of truth for the "contractlens.db" default so it can't
+    silently drift from a duplicated literal elsewhere (see app/main.py,
+    which imports this instead of re-inlining the default).
+    """
+    return os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")
+
+
 class ContractRecord(SQLModel, table=True):
     """A single serialized Contract, stored as one JSON blob per row."""
 
@@ -29,8 +39,7 @@ class ContractRecord(SQLModel, table=True):
 class ContractStore:
     def __init__(self, database_url: str | None = None) -> None:
         if database_url is None:
-            db_path = os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")
-            database_url = f"sqlite:///{db_path}"
+            database_url = f"sqlite:///{resolve_db_path()}"
 
         engine_kwargs: dict = {}
         if database_url.startswith("sqlite"):

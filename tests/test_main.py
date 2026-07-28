@@ -14,7 +14,6 @@ under test.
 
 import asyncio
 import io
-import os
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
@@ -26,7 +25,7 @@ from app.chat.assistant import ExtractiveBackend
 from app.main import app
 from app.mcp.client import MCPToolClient
 from app.models.contract import Clause, Contract
-from app.store import ContractStore
+from app.store import ContractStore, resolve_db_path
 
 
 @pytest.fixture(autouse=True)
@@ -118,7 +117,7 @@ def test_report_route_404s_for_unknown_contract():
 
 
 def test_chat_raises_clear_error_when_mcp_client_fails_to_start(monkeypatch):
-    """A start() failure must surface as an error, not hang forever.
+    """A start() failure must surface as a clear 502, not hang or 500.
 
     Regression test for a bug caught in review: app.main's _mcp_supervisor
     previously only called `ready.set()` on the *success* path of
@@ -128,6 +127,13 @@ def test_chat_raises_clear_error_when_mcp_client_fails_to_start(monkeypatch):
     hang forever on `await _mcp_ready.wait()` instead of getting a clear
     failure. The fix stores the exception in `_mcp_start_error`, always sets
     `ready` in a `finally`, and has `_ensure_mcp_started()` re-raise it.
+
+    A second review pass then found that the re-raised exception was left to
+    propagate unhandled out of the route, producing a raw 500 with no useful
+    detail. Per the design spec ("a real dependency the app now needs... a
+    clear error beats a silent partial answer"), /chat now wraps its
+    MCP-dependent calls and turns any such failure into a 502 with a
+    descriptive detail message -- asserted below instead of the old 500.
 
     This patches `MCPToolClient.start` on the shared `_mcp_client` singleton
     to raise, then hits /chat (no contract upload needed, and the autouse
@@ -152,11 +158,11 @@ def test_chat_raises_clear_error_when_mcp_client_fails_to_start(monkeypatch):
             resp = future.result(timeout=10)
         except FutureTimeoutError:
             pytest.fail("chat route hung instead of surfacing the start() failure")
-        except RuntimeError as exc:
-            assert "simulated MCP subprocess spawn failure" in str(exc)
-            return
 
-    assert resp.status_code == 500
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert "simulated MCP subprocess spawn failure" in detail
+    assert "MCP service unavailable" in detail
 
 
 async def test_ensure_mcp_started_raises_for_every_concurrent_caller_on_failure(monkeypatch):
@@ -228,11 +234,14 @@ async def test_mcp_subprocess_inherits_custom_contractlens_db_path(monkeypatch, 
     successfully uploaded and persisted at the custom path.
 
     This test proves the fix (app/main.py now explicitly passes
-    env={"CONTRACTLENS_DB_PATH": os.environ.get(...)} when constructing
+    env={"CONTRACTLENS_DB_PATH": resolve_db_path()} when constructing
     _mcp_client) actually works, by exercising the same construction here:
       1. Set CONTRACTLENS_DB_PATH to a custom temp-file path.
       2. Build an MCPToolClient exactly as app/main.py's module-level code
-         does: env={"CONTRACTLENS_DB_PATH": os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")}.
+         does: env={"CONTRACTLENS_DB_PATH": resolve_db_path()} -- importing
+         resolve_db_path() from app.store (rather than re-inlining its
+         default literal here) so this test can't silently drift out of
+         sync with app/store.py's own default the way the original bug did.
       3. Write a contract directly into a ContractStore pointed at that same
          custom path (bypassing the shared app.store.store singleton, since
          this test process and the server subprocess are different OS
@@ -286,9 +295,7 @@ async def test_mcp_subprocess_inherits_custom_contractlens_db_path(monkeypatch, 
 
     # Fixed case: mirrors app/main.py's current module-level construction
     # exactly.
-    client = MCPToolClient(
-        env={"CONTRACTLENS_DB_PATH": os.environ.get("CONTRACTLENS_DB_PATH", "contractlens.db")}
-    )
+    client = MCPToolClient(env={"CONTRACTLENS_DB_PATH": resolve_db_path()})
     try:
         result = await client.call_tool("search_clauses", query="governing law", k=5)
         assert result["hits"], "subprocess did not find the clause -- it likely opened the wrong db file"

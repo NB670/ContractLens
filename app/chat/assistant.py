@@ -26,11 +26,15 @@ from __future__ import annotations
 
 import re
 
+import anyio
+
 from app.config import settings
 from app.models.chat import ChatResponse, Citation
 
 _EXCERPT_CHARS = 320
-_RISK_INTENT = re.compile(r"\brisk|risky|liabilit|indemnif|dangerous|red flag|concern", re.IGNORECASE)
+_RISK_INTENT = re.compile(
+    r"\b(risk|risky|liabilit|indemnif|dangerous|red flag|concern)", re.IGNORECASE
+)
 
 
 def _excerpt(text: str, limit: int = _EXCERPT_CHARS) -> str:
@@ -193,7 +197,16 @@ class ChatAssistant:
             if used:
                 tools_used.append("assess_risk")
 
-        answer_text = self.backend.generate(question, citations, risk_summary)
+        # self.backend.generate() is a synchronous call -- for LocalLLMBackend
+        # it runs a transformers pipeline (and, on first use, downloads the
+        # model), which would otherwise block this coroutine's event loop for
+        # the full duration, including the MCP subprocess's own stdio I/O.
+        # Running it in a worker thread keeps the loop free. ExtractiveBackend
+        # is fast and synchronous too, so the thread-hop overhead is
+        # negligible there.
+        answer_text = await anyio.to_thread.run_sync(
+            self.backend.generate, question, citations, risk_summary
+        )
 
         return ChatResponse(
             question=question, answer=answer_text, backend=self.backend.name,

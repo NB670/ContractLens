@@ -10,6 +10,8 @@ are what's actually tested; the narrative is presentational only.
 
 from __future__ import annotations
 
+import anyio
+
 from app.models.analysis import RiskFinding
 from app.models.report import ExecutiveReport
 
@@ -49,7 +51,11 @@ async def build_report(contract_id: str, mcp_client, llm_backend=None) -> Execut
 
     narrative = None
     if llm_backend is not None:
-        narrative = _llm_narrative(data, llm_backend)
+        # _llm_narrative ultimately calls the synchronous transformers
+        # pipeline (LocalLLMBackend.generate_raw) -- run it in a worker
+        # thread so it doesn't block this coroutine's event loop (and the
+        # MCP subprocess's own stdio I/O) for the duration of generation.
+        narrative = await anyio.to_thread.run_sync(_llm_narrative, data, llm_backend)
     if not narrative:
         narrative = _template_narrative(data)
 

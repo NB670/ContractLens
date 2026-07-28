@@ -17,6 +17,8 @@ server subprocess open the identical isolated file, deterministic
 regardless of whatever's in the real local contractlens.db.
 """
 
+from pathlib import Path
+
 import pytest
 
 from app.mcp.client import MCPToolClient, MCPToolError
@@ -112,3 +114,42 @@ async def test_start_failure_closes_the_partial_stack(monkeypatch):
 
     # stop() after a failed start() must still be a safe no-op.
     await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_passes_cwd_to_stdio_server_parameters(monkeypatch):
+    """MCPToolClient(cwd=...) threads through to StdioServerParameters(cwd=...).
+
+    Regression coverage for a review finding: the subprocess previously only
+    worked by coincidence of inheriting the parent's cwd (`python -m` puts
+    the inherited cwd on sys.path). app/main.py now pins the real subprocess
+    to the repo root explicitly via this cwd parameter rather than relying on
+    inheritance; this confirms the value actually reaches
+    StdioServerParameters instead of being silently dropped, while a real
+    subprocess still starts and serves a tool call with an explicit cwd.
+
+    Not asserting on this doesn't require special-casing cwd=None (the
+    default): every other test in this module constructs MCPToolClient
+    without cwd at all, so the inherited-cwd behavior they rely on is already
+    exercised as the default path everywhere else in this file.
+    """
+    import app.mcp.client as client_module
+
+    repo_root = Path(__file__).resolve().parents[1]
+    captured = {}
+    original = client_module.StdioServerParameters
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(client_module, "StdioServerParameters", spy)
+
+    client = MCPToolClient(cwd=repo_root)
+    try:
+        result = await client.call_tool("assess_risk", contract_id="does-not-exist")
+        assert result == {"found": False}
+    finally:
+        await client.stop()
+
+    assert captured.get("cwd") == repo_root
