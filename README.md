@@ -153,11 +153,13 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-Then open <http://127.0.0.1:8000/docs> for the interactive API. Upload a contract
-via `POST /upload` (try `data/sample_contract.txt`), note the returned `id`, then:
+Then open <http://127.0.0.1:8000/docs> for the interactive API, or
+<http://127.0.0.1:8000/> for the dashboard. Upload a contract via `POST
+/upload` (try `data/sample_contract.txt`), note the returned `id`, then:
 
 - `GET /contracts/{id}` — structured JSON (contract type, parties, clauses, categories)
 - `GET /contracts/{id}/view` — HTML clause-visualization page
+- `GET /health` — liveness/service info (checkpoint number, configured backends)
 
 Uploaded contracts persist in `contractlens.db` (SQLite) across server restarts.
 
@@ -171,6 +173,8 @@ All settings are optional environment variables (see `app/config.py`):
 | `CONTRACTLENS_CLASSIFIER` | `rule` | classifier backend: `rule` or `legalbert` |
 | `CONTRACTLENS_LEGALBERT_MODEL` | `nlpaueb/legal-bert-base-uncased` | HF model id for the LegalBERT backend |
 | `CONTRACTLENS_DB_PATH` | `contractlens.db` | SQLite file path |
+| `CONTRACTLENS_RETRIEVAL_BACKEND` | `sentence` | retrieval embedding backend: `sentence` or `hashing` |
+| `CONTRACTLENS_RETRIEVAL_MODEL` | `all-MiniLM-L6-v2` | sentence-transformers model id for the `sentence` backend |
 | `CONTRACTLENS_CHAT_BACKEND` | `local` | chat backend: `local` or `extractive` |
 | `CONTRACTLENS_CHAT_MODEL` | `Qwen/Qwen2.5-0.5B-Instruct` | HF model id for the local chat backend |
 
@@ -281,6 +285,12 @@ function calls:
   `build_report_data` as real MCP tools. `app/mcp/client.py`'s
   `MCPToolClient` is the only way the rest of the app reaches these
   services — the chat assistant and the report generator both go through it.
+  Note: this subprocess always uses the dependency-free `HashingEmbedder`
+  for its own clause index, regardless of `CONTRACTLENS_RETRIEVAL_BACKEND` —
+  a deliberate tradeoff (keeps the subprocess free of a second
+  sentence-transformers model load) documented in the module's docstring.
+  `CONTRACTLENS_RETRIEVAL_BACKEND` only affects `/search`/`/similar`, not
+  chat/report grounding.
 - **Chatbot** (`app/chat/assistant.py`) — retrieval-grounded (RAG) question
   answering with cited clauses. `LocalLLMBackend` uses a small
   instruction-tuned model (`Qwen/Qwen2.5-0.5B-Instruct` by default) via its
@@ -296,6 +306,11 @@ function calls:
   - `GET /contracts/{id}/report.json` — the underlying structured data.
 - **Dashboard** (`GET /`) — upload form + list of stored contracts, linking
   to each contract's view/chat/report pages.
+
+The chat and report routes are backed by the MCP server subprocess: if it
+fails to start or a tool call errors, `/chat` and `/contracts/{id}/report[.json]`
+return `502` with a `detail` message rather than a raw 500 or a silent
+partial answer.
 
 ### Trying the Checkpoint 4 endpoints
 
