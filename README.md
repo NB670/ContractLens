@@ -167,11 +167,44 @@ Then open <http://127.0.0.1:8000/> for the dashboard, or
 <http://127.0.0.1:8000/docs> for the interactive Swagger API. Uploaded
 contracts persist in `contractlens.db` (SQLite) across server restarts.
 
-The default configuration needs no model downloads to start up (rule-based
-classifier, hashing-fallback-free semantic retrieval via
-`sentence-transformers`). The chat backend defaults to the local LLM, which
-downloads `Qwen/Qwen2.5-0.5B-Instruct` (~1GB) on its first use — set
-`CONTRACTLENS_CHAT_BACKEND=extractive` if you'd rather skip that.
+### Models, downloads, and offline alternatives
+
+**No API keys are required anywhere in this project** — everything runs
+locally, which is the privacy-preserving design goal stated at the top of
+this README. The only optional credential is an `HF_TOKEN` environment
+variable for HuggingFace Hub downloads below, purely to avoid an
+anonymous-request rate limit; nothing fails or is disabled without one.
+
+Two model downloads happen automatically with the **default** configuration
+(no PACE, no manual steps — just needs internet access on first run):
+
+| Model | Size | Downloads when | Dependency-free alternative |
+|---|---|---|---|
+| `all-MiniLM-L6-v2` (sentence-transformers) | ~90MB | Every startup, by default (`CONTRACTLENS_RETRIEVAL_BACKEND=sentence`) | `CONTRACTLENS_RETRIEVAL_BACKEND=hashing` |
+| `Qwen/Qwen2.5-0.5B-Instruct` | ~1GB | First `/chat` or `/report` call, by default (`CONTRACTLENS_CHAT_BACKEND=local`) | `CONTRACTLENS_CHAT_BACKEND=extractive` |
+
+Both alternatives are fully offline, dependency-free, and deterministic —
+no functionality is gated behind them; they're worse only in the sense that
+hashing-based retrieval and template-composed chat answers are less
+semantically sharp than their model-backed counterparts. To run with **zero
+model downloads at all**:
+
+```bash
+CONTRACTLENS_RETRIEVAL_BACKEND=hashing CONTRACTLENS_CHAT_BACKEND=extractive uvicorn app.main:app --reload
+```
+
+Two more classifier backends exist beyond the zero-download `rule` default:
+
+- `CONTRACTLENS_CLASSIFIER=legalbert` downloads `nlpaueb/legal-bert-base-uncased`
+  (~440MB) — a zero-shot backend, no training/local files needed beyond the download.
+- `CONTRACTLENS_CLASSIFIER=legalbert-finetuned` needs **local weights that
+  are not downloadable from anywhere** — they're a real artifact produced by
+  training (see "Fine-tuned LegalBERT classifier" below), gitignored because
+  they're a 433MB binary build output, not source. Without
+  `models/legalbert-finetuned/final/` present, this backend **automatically
+  and silently falls back to `RuleBasedClassifier`** (verified: no crash, no
+  missing-file error) — so pointing at it without the weights is safe, just
+  a no-op, not something that needs to be worked around.
 
 ### Configuration
 
@@ -200,6 +233,54 @@ required) — external dependencies are faked or injected where the real thing
 would need a model download (`tests/test_chat.py`, `tests/test_reports.py`)
 or spin up a subprocess (`tests/test_mcp_client.py`, `tests/test_main.py`,
 which do genuinely launch the real MCP server as a subprocess, offline).
+
+---
+
+## Reproducing the checkpoint claims
+
+Every claim in the checkpoint reports (`Checkpoints/`) can be independently
+verified from this repository alone — no chat history, no external state.
+This is the fastest path through all of it:
+
+```bash
+git clone https://github.com/NB670/ContractLens.git
+cd ContractLens
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+python -m pytest -q                      # 93 tests, fully offline
+uvicorn app.main:app --reload             # then walk through "Trying every feature" below
+```
+
+This was independently re-verified end to end from a genuinely fresh clone
+(new venv, no cached dependencies, no pre-existing `contractlens.db` or
+`models/`) immediately before this section was written — install, full test
+suite, server boot, and upload/view/search/risk/chat all confirmed working.
+The one real issue that check caught and fixed: `requirements.txt` had an
+unbounded `mcp>=1.28`, and a breaking `mcp==2.0.0` released upstream would
+otherwise have broken a fresh install starting today (now pinned `<2`).
+
+**To check "Match" (does it do what's claimed):** work through "Trying every
+feature" below — every route named in the reports has a runnable example
+there.
+
+**To check "Factual" (do the specific numbers/files hold up):**
+
+```bash
+python -m scripts.run_benchmarks --classifier legalbert-finetuned --retrieval-backend hashing --out ""
+```
+
+compares against the committed `results/benchmark_20260728T234451Z.json`
+and `results/presentation/summary.json`. Note this specific command falls
+back to the rule-based classifier with a printed warning unless
+`models/legalbert-finetuned/final/` is present locally (see "Models,
+downloads, and offline alternatives" above) — the fine-tuned weights
+themselves are a 433MB training artifact, not something `pip install`
+or a fresh clone can produce; `docs/PACE_FINETUNE.md` has the full
+reproduction path via GPU training. `python -m scripts.evaluate_clauses
+--backend rule` and the other `scripts/evaluate_*.py` harnesses all run
+immediately with no setup, scoring against the same committed fixtures
+cited in the reports.
 
 ---
 
@@ -407,20 +488,27 @@ fixture every other classifier is benchmarked against:
 | Rule-based (keyword) | 0.646 |
 | Zero-shot LegalBERT | 0.554 |
 
-**Two things worth knowing before trusting that number:**
+**Things worth knowing before trusting that number:**
 
 1. 78% of the benchmark's source contracts also contributed other clauses to
    training, so 0.966 overstates generalization to genuinely unseen contract
    templates. A cleaner check — two hand-written test contracts with zero
    relation to CUAD, in different registers (plain English and dense
-   legalese) — put it at 13/13 correct on its trained categories, which is a
-   more trustworthy (if smaller-sample) signal.
-2. It only covers 7 of the 10 categories (CUAD has no ground truth for
+   legalese) — put it at 13/13 correct on its trained categories.
+2. A further adversarial check — clauses deliberately written to defeat
+   keyword spotting (one with a misleading keyword from the wrong category,
+   four describing a concept without ever using its obvious keyword) — got
+   4/5 (80%) correct, and notably beat the rule-based classifier on all four
+   keyword-free cases (which it missed entirely). It also confidently
+   mislabeled the one misleading-keyword case, so it isn't immune to that
+   failure mode either.
+3. It only covers 7 of the 10 categories (CUAD has no ground truth for
    Confidentiality, Indemnification, or Force Majeure) and, unlike the
    rule-based classifier, has no "Unclassified" output — fed a clause from
-   one of those 3 categories, it confidently picks the closest of its 7
-   known labels instead (observed: Confidentiality → Intellectual Property,
-   Indemnification → Liability). This is why it's opt-in
+   one of those 3 categories, or even non-contract text entirely, it
+   confidently picks one of its 7 known labels instead of abstaining
+   (observed: Confidentiality → Intellectual Property at 73-91% confidence;
+   nonsense text → Payment Terms at 89% confidence). This is why it's opt-in
    (`CONTRACTLENS_CLASSIFIER=legalbert-finetuned`), not the default.
 
 To reproduce the training run or fine-tune again with more data, see

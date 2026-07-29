@@ -34,8 +34,12 @@ scipy>=1.13
 numpy>=1.26
 
 # MCP server for the CP4 chatbot / report tool integrations. Imported in
-# app/mcp/server.py (FastMCP) and app/mcp/client.py (ClientSession).
-mcp>=1.28
+# app/mcp/server.py (FastMCP) and app/mcp/client.py (ClientSession). Pinned
+# below 2.0: the 2.0.0 release reorganizes the package (splits out a
+# separate mcp-types dependency, restructures imports) and removes the
+# mcp.server.fastmcp import path this code relies on -- a fresh install
+# with an unbounded ">=1.28" pulls in 2.0.0 and breaks immediately.
+mcp>=1.28,<2
 
 # Testing
 pytest>=8.0
