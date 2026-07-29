@@ -11,11 +11,16 @@ sqlmodel>=0.0.21
 pypdf>=4.0
 python-docx>=1.1
 
-# LegalBERT clause classification backend (embedding + cosine similarity).
-# Imported lazily in app/clauses/classifier.py; the rule-based backend still
-# works without these installed, so a lighter-weight deployment can omit them.
+# LegalBERT clause classification backends (zero-shot embedding + cosine
+# similarity, and the fine-tuned classification head). Imported lazily in
+# app/clauses/classifier.py; the rule-based backend still works without
+# these installed, so a lighter-weight deployment can omit them.
 transformers>=4.40
 torch>=2.2
+
+# Fine-tuning only (scripts/finetune_legalbert.py, run on a GPU e.g. via
+# PACE -- see docs/PACE_FINETUNE.md). Not needed to run the app or to use
+# an already-trained models/legalbert-finetuned/ checkpoint.
 accelerate>=1.1.0
 scikit-learn>=1.4
 
@@ -40,3 +45,7 @@ pytest-asyncio>=0.24
 # not needed to run the app or to score against the already-committed
 # data/cuad_sample.json fixture).
 datasets>=2.19
+
+# Presentation chart generation only (scripts/make_presentation_charts.py);
+# not needed to run the app, the test suite, or any other script.
+matplotlib>=3.8

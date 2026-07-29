@@ -46,6 +46,7 @@ from app.reports.generator import build_report
 from app.retrieval.index import ClauseIndex
 from app.risk.analyzer import analyze_risk
 from app.store import resolve_db_path, store
+from app.web.layout import page, severity_class, tag_class
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -222,32 +223,34 @@ def dashboard() -> str:
             f"<tr><td><code>{cid}</code></td><td>{fname}</td>"
             f"<td>{html.escape(contract.metadata.contract_type)}</td>"
             f"<td>{len(contract.clauses)}</td>"
-            f"<td><a href='/contracts/{cid}/view'>view</a> &middot; "
-            f"<a href='/contracts/{cid}/chat'>chat</a> &middot; "
-            f"<a href='/contracts/{cid}/report'>report</a></td></tr>"
+            f"<td><div class='actions'>"
+            f"<a href='/contracts/{cid}/view'>Clauses</a>"
+            f"<a href='/contracts/{cid}/chat'>Chat</a>"
+            f"<a href='/contracts/{cid}/report'>Report</a>"
+            f"</div></td></tr>"
         )
-    table_rows = "".join(rows) or "<tr><td colspan='5'>No contracts uploaded yet.</td></tr>"
+    table_rows = "".join(rows) or (
+        "<tr><td colspan='5'><div class='empty-state'>"
+        "No contracts uploaded yet — upload one above to get started."
+        "</div></td></tr>"
+    )
 
-    return f"""<!doctype html>
-<html><head><meta charset='utf-8'><title>ContractLens</title>
-<style>
-body {{ font-family: system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; }}
-table {{ border-collapse: collapse; width: 100%; margin-top: 1rem; }}
-th, td {{ text-align: left; border-bottom: 1px solid #ddd; padding: .5rem; }}
-form {{ margin-top: 1rem; }}
-</style></head><body>
+    content = f"""
 <h1>ContractLens</h1>
-<p>Privacy-preserving contract intelligence platform.</p>
-<form action='/upload' method='post' enctype='multipart/form-data'>
-  <input type='file' name='file' required>
-  <button type='submit'>Upload contract</button>
-</form>
+<p class='lede'>Privacy-preserving contract intelligence platform.</p>
+<div class='dropzone'>
+  <form action='/upload' method='post' enctype='multipart/form-data' style='display:flex;gap:.75rem;align-items:center;flex:1;flex-wrap:wrap;'>
+    <input type='file' name='file' required>
+    <button type='submit' class='btn btn-primary'>Upload contract</button>
+  </form>
+</div>
 <h2>Contracts</h2>
-<table>
+<table class='data'>
 <tr><th>ID</th><th>Filename</th><th>Type</th><th>Clauses</th><th>Actions</th></tr>
 {table_rows}
 </table>
-</body></html>"""
+"""
+    return page("ContractLens", content)
 
 
 async def _ingest_upload(file: UploadFile) -> Contract:
@@ -331,43 +334,41 @@ def view_contract(contract_id: str) -> str:
     if contract is None:
         raise HTTPException(status_code=404, detail="Contract not found.")
 
-    rows = []
-    for category, count in contract.categories_present().items():
-        rows.append(f"<li><strong>{html.escape(category)}</strong>: {count}</li>")
+    category_chips = "".join(
+        f"<span class='badge {tag_class(category)}'>{html.escape(category)} · {count}</span> "
+        for category, count in contract.categories_present().items()
+    ) or "<span class='badge badge-neutral'>None identified</span>"
 
     clause_blocks = []
     for clause in contract.clauses:
         heading = html.escape(clause.heading or f"Clause {clause.index + 1}")
         snippet = html.escape(clause.text[:400])
         clause_blocks.append(
-            f"<div class='clause'>"
-            f"<h3>{heading} "
-            f"<span class='cat'>[{html.escape(clause.category)} "
-            f"&middot; {clause.confidence:.2f}]</span></h3>"
+            f"<div class='clause-card'>"
+            f"<div class='clause-head'><h3>{heading}</h3>"
+            f"<span class='badge {tag_class(clause.category)}'>"
+            f"{html.escape(clause.category)} · {clause.confidence:.0%}</span></div>"
             f"<p class='offsets'>chars {clause.start_offset}-{clause.end_offset}</p>"
             f"<pre>{snippet}</pre>"
             f"</div>"
         )
 
     meta = contract.metadata
-    return f"""<!doctype html>
-<html><head><meta charset='utf-8'><title>ContractLens — {html.escape(contract.filename)}</title>
-<style>
-body {{ font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; }}
-.cat {{ color: #555; font-weight: normal; font-size: .85em; }}
-.offsets {{ color: #999; font-size: .8em; margin: 0; }}
-.clause {{ border-left: 3px solid #ddd; padding-left: 1rem; margin: 1rem 0; }}
-pre {{ white-space: pre-wrap; background: #f7f7f7; padding: .5rem; }}
-</style></head><body>
-<h1>{html.escape(contract.filename)}</h1>
-<p><strong>Type:</strong> {html.escape(meta.contract_type)} &middot;
+    fname = html.escape(contract.filename)
+    content = f"""
+<h1>{fname}</h1>
+<p class='lede'><strong>Type:</strong> {html.escape(meta.contract_type)} &middot;
    <strong>Parties:</strong> {html.escape(', '.join(meta.parties) or 'n/a')} &middot;
    <strong>Clauses:</strong> {meta.num_clauses}</p>
 <h2>Identified categories</h2>
-<ul>{''.join(rows) or '<li>None</li>'}</ul>
+<p>{category_chips}</p>
 <h2>Clauses</h2>
-{''.join(clause_blocks) or '<p>No clauses detected.</p>'}
-</body></html>"""
+{''.join(clause_blocks) or "<div class='empty-state'>No clauses detected.</div>"}
+"""
+    return page(
+        f"ContractLens — {fname}", content, active="view",
+        contract_id=contract_id, contract_label=fname,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -458,7 +459,6 @@ def chat_ui(contract_id: str) -> str:
     if contract is None:
         raise HTTPException(status_code=404, detail="Contract not found.")
 
-    cid = html.escape(contract_id)
     fname = html.escape(contract.filename)
     # json.dumps (not Python repr) because this value is embedded directly
     # into a <script> block: repr() escapes quotes/backslashes but not
@@ -467,30 +467,13 @@ def chat_ui(contract_id: str) -> str:
     # server-generated uuid4 hex and unknown ids 404 before reaching this
     # template), but this is the safe idiom regardless, at no cost.
     cid_js = json.dumps(contract_id).replace("</", "<\\/")
-    return f"""<!doctype html>
-<html><head><meta charset='utf-8'>
-<title>ContractLens — Chat · {fname}</title>
-<style>
-body {{ font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }}
-h1 {{ font-size: 1.4rem; }}
-#log {{ border: 1px solid #ddd; border-radius: 8px; padding: 1rem; min-height: 8rem; }}
-.msg {{ margin: .75rem 0; }}
-.you {{ font-weight: 600; }}
-.bot pre {{ white-space: pre-wrap; background: #f7f7f7; padding: .6rem; border-radius: 6px; }}
-.cites {{ font-size: .82em; color: #555; }}
-form {{ display: flex; gap: .5rem; margin-top: 1rem; }}
-input[type=text] {{ flex: 1; padding: .55rem; }}
-button {{ padding: .55rem 1rem; }}
-.nav a {{ font-size: .85em; }}
-</style></head><body>
-<h1>ContractLens Chat</h1>
-<p class='nav'><a href='/'>&larr; dashboard</a> &middot; Contract <code>{cid}</code> — {fname} ·
-   <a href='/contracts/{cid}/view'>clause view</a> &middot;
-   <a href='/contracts/{cid}/report'>report</a></p>
-<div id='log'></div>
-<form id='f'>
+    content = f"""
+<h1>Chat</h1>
+<p class='lede'>Ask a natural-language question; every answer cites the clauses it's grounded in.</p>
+<div id='log' class='chat-log'></div>
+<form id='f' class='chat-form'>
   <input type='text' id='q' placeholder='Ask about this contract…' autocomplete='off' required>
-  <button type='submit'>Ask</button>
+  <button type='submit' class='btn btn-primary'>Ask</button>
 </form>
 <script>
 const CID = {cid_js};
@@ -500,27 +483,32 @@ document.getElementById('f').addEventListener('submit', async (e) => {{
   e.preventDefault();
   const q = document.getElementById('q').value.trim();
   if (!q) return;
-  log.innerHTML += `<div class='msg you'>You: ${{esc(q)}}</div>`;
+  log.innerHTML += `<div class='msg you'><div class='bubble'>${{esc(q)}}</div></div>`;
   document.getElementById('q').value = '';
+  log.scrollTop = log.scrollHeight;
   const r = await fetch('/chat', {{
     method: 'POST', headers: {{ 'Content-Type': 'application/json' }},
     body: JSON.stringify({{ question: q, contract_id: CID }})
   }});
   const data = await r.json();
   if (!r.ok) {{
-    log.innerHTML += `<div class='msg bot'><pre>Error: ${{esc(data.detail || ('request failed with status ' + r.status))}}</pre></div>`;
+    log.innerHTML += `<div class='msg bot'><div class='bubble'><pre>Error: ${{esc(data.detail || ('request failed with status ' + r.status))}}</pre></div></div>`;
     log.scrollTop = log.scrollHeight;
     return;
   }}
   let cites = (data.citations || []).map((c, i) =>
     `[${{i + 1}}] ${{esc(c.category)}} · clause ${{c.clause_index}} (sim ${{c.score.toFixed(2)}})`
   ).join('<br>');
-  log.innerHTML += `<div class='msg bot'><pre>${{esc(data.answer)}}</pre>` +
-    (cites ? `<div class='cites'>${{cites}}</div>` : '') + `</div>`;
+  log.innerHTML += `<div class='msg bot'><div class='bubble'><pre>${{esc(data.answer)}}</pre>` +
+    (cites ? `<div class='cites'>${{cites}}</div>` : '') + `</div></div>`;
   log.scrollTop = log.scrollHeight;
 }});
 </script>
-</body></html>"""
+"""
+    return page(
+        f"ContractLens — Chat · {fname}", content, active="chat",
+        contract_id=contract_id, contract_label=fname,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -558,29 +546,36 @@ async def contract_report_html(contract_id: str) -> str:
         raise HTTPException(status_code=404, detail="Contract not found.")
 
     findings_rows = "".join(
-        f"<li><strong>{html.escape(f.severity)}</strong> ({html.escape(f.category)}): "
-        f"{html.escape(f.rationale)}</li>"
+        f"<div class='finding'>"
+        f"<span class='badge {severity_class(f.severity)}'>{html.escape(f.severity)}</span>"
+        f"<div><div class='rationale'>{html.escape(f.rationale)}</div>"
+        f"<div class='category'>{html.escape(f.category)}</div></div></div>"
         for f in report.top_findings
-    ) or "<li>No significant findings.</li>"
-    categories_rows = "".join(
-        f"<li>{html.escape(cat)}: {count}</li>" for cat, count in report.categories.items()
-    )
+    ) or "<div class='empty-state'>No significant findings.</div>"
+    categories_chips = "".join(
+        f"<span class='badge {tag_class(cat)}'>{html.escape(cat)} · {count}</span> "
+        for cat, count in report.categories.items()
+    ) or "<span class='badge badge-neutral'>None identified</span>"
 
-    return f"""<!doctype html>
-<html><head><meta charset='utf-8'><title>ContractLens — Report · {html.escape(report.filename)}</title>
-<style>
-body {{ font-family: system-ui, sans-serif; max-width: 820px; margin: 2rem auto; padding: 0 1rem; }}
-.narrative {{ background: #f7f7f7; padding: 1rem; border-radius: 6px; }}
-.nav a {{ font-size: .85em; }}
-</style></head><body>
-<p class='nav'><a href='/'>&larr; dashboard</a> &middot;
-   <a href='/contracts/{html.escape(report.contract_id)}/chat'>chat</a></p>
-<h1>Executive Report — {html.escape(report.filename)}</h1>
-<p><strong>Type:</strong> {html.escape(report.contract_type)} &middot;
-   <strong>Risk:</strong> {html.escape(report.risk_level)} ({report.overall_score:.0f}/100)</p>
-<div class='narrative'>{html.escape(report.narrative or "")}</div>
+    fname = html.escape(report.filename)
+    content = f"""
+<h1>Executive Report</h1>
+<p class='lede'>{fname}</p>
+<div class='card' style='margin-bottom:1.5rem;'>
+  <p style='margin:0 0 .75rem;'>
+    <strong>Type:</strong> {html.escape(report.contract_type)} &middot;
+    <strong>Risk:</strong>
+    <span class='badge {severity_class(report.risk_level)}'>{html.escape(report.risk_level)}
+      · {report.overall_score:.0f}/100</span>
+  </p>
+  <div class='callout'>{html.escape(report.narrative or "")}</div>
+</div>
 <h2>Clause categories</h2>
-<ul>{categories_rows or '<li>None identified.</li>'}</ul>
+<p>{categories_chips}</p>
 <h2>Top risk findings</h2>
-<ul>{findings_rows}</ul>
-</body></html>"""
+{findings_rows}
+"""
+    return page(
+        f"ContractLens — Report · {fname}", content, active="report",
+        contract_id=report.contract_id, contract_label=fname,
+    )
