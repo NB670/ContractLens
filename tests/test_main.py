@@ -84,6 +84,52 @@ def test_dashboard_has_upload_form():
     assert '/upload' in resp.text
 
 
+def test_dashboard_upload_form_posts_to_redirecting_route_not_raw_json():
+    """Regression test: the dashboard's form must not POST straight to the
+    plain JSON /upload endpoint, or a plain HTML form submission makes the
+    browser navigate to and display raw JSON instead of returning to the
+    dashboard -- confirmed happening live before this fix.
+    """
+    with TestClient(app) as client:
+        resp = client.get("/")
+    assert "/upload/dashboard" in resp.text
+
+
+def test_upload_from_dashboard_redirects_to_dashboard_with_success_banner():
+    with TestClient(app) as client:
+        resp = client.post(
+            "/upload/dashboard",
+            files={"file": ("dash-upload-test.txt", io.BytesIO(
+                b"1. Confidentiality\nEach party shall keep information confidential.\n"
+            ), "text/plain")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"].startswith("/?uploaded=")
+
+        dashboard_resp = client.get(resp.headers["location"])
+
+    assert dashboard_resp.status_code == 200
+    assert "dash-upload-test.txt" in dashboard_resp.text
+    assert "Uploaded" in dashboard_resp.text
+
+
+def test_upload_from_dashboard_redirects_with_error_banner_on_bad_file():
+    with TestClient(app) as client:
+        resp = client.post(
+            "/upload/dashboard",
+            files={"file": ("bad.xyz", io.BytesIO(b"not a real contract"), "application/octet-stream")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "upload_error=" in resp.headers["location"]
+
+        dashboard_resp = client.get(resp.headers["location"])
+
+    assert dashboard_resp.status_code == 200
+    assert "Upload failed" in dashboard_resp.text
+
+
 def test_report_html_route_renders_for_known_contract():
     with TestClient(app) as client:
         contract_id = _upload_txt(
@@ -114,6 +160,86 @@ def test_report_route_404s_for_unknown_contract():
     with TestClient(app) as client:
         resp = client.get("/contracts/does-not-exist/report.json")
     assert resp.status_code == 404
+
+
+def test_view_contract_links_to_similar_clauses_page():
+    with TestClient(app) as client:
+        contract_id = _upload_txt(
+            client, "similar-link-test.txt",
+            "1. Confidentiality\nEach party shall keep information confidential.\n",
+        )
+        resp = client.get(f"/contracts/{contract_id}/view")
+
+    assert resp.status_code == 200
+    assert f"/contracts/{contract_id}/similar/0/view" in resp.text
+
+
+def test_similar_clauses_view_shows_source_and_results():
+    with TestClient(app) as client:
+        contract_id = _upload_txt(
+            client, "similar-view-test.txt",
+            "1. Confidentiality\nEach party shall keep information confidential.\n"
+            "2. Termination\nEither party may terminate this agreement upon notice.\n",
+        )
+        resp = client.get(f"/contracts/{contract_id}/similar/0/view")
+
+    assert resp.status_code == 200
+    assert "Source clause" in resp.text
+    assert "confidential" in resp.text.lower()
+
+
+def test_similar_clauses_view_404s_for_unknown_contract():
+    with TestClient(app) as client:
+        resp = client.get("/contracts/does-not-exist/similar/0/view")
+    assert resp.status_code == 404
+
+
+def test_similar_clauses_view_404s_for_out_of_range_clause_index():
+    with TestClient(app) as client:
+        contract_id = _upload_txt(
+            client, "similar-oob-test.txt", "1. Confidentiality\nKeep this secret.\n",
+        )
+        resp = client.get(f"/contracts/{contract_id}/similar/99/view")
+    assert resp.status_code == 404
+
+
+def test_compare_view_renders_upload_form():
+    with TestClient(app) as client:
+        resp = client.get("/compare")
+    assert resp.status_code == 200
+    assert "<form" in resp.text
+    assert "/compare/html" in resp.text
+    assert 'name=\'base\'' in resp.text or 'name="base"' in resp.text
+    assert 'name=\'revised\'' in resp.text or 'name="revised"' in resp.text
+
+
+def test_compare_html_renders_diff_result():
+    text = "1. Confidentiality\nEach party shall keep information confidential.\n"
+    with TestClient(app) as client:
+        resp = client.post(
+            "/compare/html",
+            files={
+                "base": ("base.txt", io.BytesIO(text.encode()), "text/plain"),
+                "revised": ("revised.txt", io.BytesIO(text.encode()), "text/plain"),
+            },
+        )
+
+    assert resp.status_code == 200
+    assert "base.txt" in resp.text
+    assert "revised.txt" in resp.text
+    assert "unchanged" in resp.text
+
+
+def test_nav_bar_shows_compare_link_on_every_page():
+    with TestClient(app) as client:
+        contract_id = _upload_txt(
+            client, "nav-compare-test.txt", "1. Confidentiality\nKeep this secret.\n",
+        )
+        dashboard_resp = client.get("/")
+        view_resp = client.get(f"/contracts/{contract_id}/view")
+
+    assert "/compare" in dashboard_resp.text
+    assert "/compare" in view_resp.text
 
 
 def test_chat_raises_clear_error_when_mcp_client_fails_to_start(monkeypatch):

@@ -38,9 +38,12 @@ locally so that privacy-sensitive contracts never have to leave the user's machi
 - A **clause-visualization** view (`/contracts/{id}/view`) that lists the
   identified categories and shows each clause's text and category tag.
 - **Semantic clause retrieval** (`app/retrieval/`) — search across every
-  uploaded contract, or find clauses similar to one you already have.
+  uploaded contract, or find clauses similar to one you already have (JSON
+  API, plus an HTML page linked directly from each clause in the clause view).
 - **Contract comparison** (`app/comparison/`) via optimal clause alignment —
-  added / removed / modified / unchanged, clause by clause.
+  added / removed / modified / unchanged, clause by clause. Has its own
+  dashboard page (`GET /compare`), not just a JSON API — it's in the
+  persistent top nav on every page.
 - **Evidence-backed risk analysis** (`app/risk/`) — every finding cites the
   exact clause text and character offsets it fired on.
 - A **retrieval-grounded chatbot** (`app/chat/`) backed by a real **MCP
@@ -79,9 +82,13 @@ contract file ──▶ parsers ──▶ raw text
                     │                       assess_risk, build_report_data)
                     │                              │
                     ▼                              ▼
-              /compare (diff)           chat assistant ──▶ /chat (cited answer)
-                                         report generator ──▶ /report (executive summary)
+              /compare (diff,           chat assistant ──▶ /chat (cited answer)
+               JSON + HTML)             report generator ──▶ /report (executive summary)
 ```
+
+`/search` and `/contracts/{id}/similar/{i}` (JSON + HTML) hang off the same
+retrieval index box above — omitted from the diagram only to keep it
+readable, not because they're architecturally different from `/compare`.
 
 ## Project layout
 
@@ -205,6 +212,14 @@ Two more classifier backends exist beyond the zero-download `rule` default:
   and silently falls back to `RuleBasedClassifier`** (verified: no crash, no
   missing-file error) — so pointing at it without the weights is safe, just
   a no-op, not something that needs to be worked around.
+
+  If you were given these weights separately (e.g. a shared Drive folder,
+  since they can't go through `pip`/git), place the folder so the final
+  path is exactly `models/legalbert-finetuned/final/` relative to the repo
+  root — sitting alongside `config.json`, `model.safetensors`, etc. directly
+  inside `final/`, not nested one level deeper. That's the exact path
+  `CONTRACTLENS_LEGALBERT_FINETUNED_DIR` points to by default (see
+  Configuration below).
 
 ### Configuration
 
@@ -345,6 +360,11 @@ curl -s "http://127.0.0.1:8000/search?q=confidentiality+obligations&k=3" | pytho
 curl -s "http://127.0.0.1:8000/contracts/<id>/similar/0?k=3" | python3 -m json.tool
 ```
 
+Or in the browser: open a contract's clause view
+(`http://127.0.0.1:8000/contracts/<id>/view`) and click **"Find similar
+clauses"** on any clause card — same query, rendered as a page
+(`/contracts/<id>/similar/0/view`) instead of raw JSON.
+
 ### 5. Compare two contracts
 
 ```bash
@@ -357,6 +377,10 @@ curl -s -X POST http://127.0.0.1:8000/compare \
 Returns a clause-level diff (`added` / `removed` / `modified` / `unchanged`)
 via optimal bipartite matching, not a naive line diff. Both uploaded files
 are persisted and indexed for search too, exactly like `/upload`.
+
+Or in the browser: `http://127.0.0.1:8000/compare` (linked from the
+top nav on every page) — upload a base and revised file, get the same diff
+rendered as a page, color-coded by change type.
 
 ### 6. Evidence-backed risk report
 
@@ -410,8 +434,11 @@ deterministic template sentence built from the same structured data).
 ### 9. The dashboard
 
 `http://127.0.0.1:8000/` — upload form plus every stored contract, linking to
-its clause view, chat, and report pages. This is the front door; everything
-above is also reachable from here without touching curl.
+its clause view, chat, and report pages. **Compare** is in the top nav on
+every page (dashboard included), and **similar-clauses** is one click from
+any clause in the clause view — between those, every feature above except
+`/search` is reachable without touching curl. `/search` itself has no
+dedicated UI page (only the JSON API and the Swagger docs at `/docs`).
 
 ### 10. Switch classifier backends
 

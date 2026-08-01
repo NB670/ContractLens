@@ -7,8 +7,11 @@ Routes:
   GET  /contracts/{id}              structured JSON for a previously uploaded contract
   GET  /contracts/{id}/view         minimal HTML clause-visualization view
   GET  /search                      semantic search for clauses across all contracts
-  GET  /contracts/{id}/similar/{i}  clauses similar to one clause of a contract
-  POST /compare                     upload two contracts, get a clause-level semantic diff
+  GET  /contracts/{id}/similar/{i}  clauses similar to one clause of a contract (JSON)
+  GET  /contracts/{id}/similar/{i}/view  same, rendered as an HTML page
+  POST /compare                     upload two contracts, get a clause-level semantic diff (JSON)
+  GET  /compare                     upload-two-contracts HTML form
+  POST /compare/html                same comparison, rendered as an HTML diff page
   GET  /contracts/{id}/risk         evidence-backed risk report
   POST /chat                        MCP-grounded, cited question answering
   GET  /contracts/{id}/chat         minimal chat UI
@@ -30,9 +33,10 @@ import html
 import json
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.chat.assistant import LocalLLMBackend, build_default_assistant
 from app.comparison.comparator import compare_contracts
@@ -210,8 +214,32 @@ async def _stop_mcp_client() -> None:
 
 
 @app.get("/", response_class=HTMLResponse)
-def dashboard() -> str:
-    """Upload form + list of stored contracts -- the CP4 platform UI's home page."""
+def dashboard(
+    uploaded: str | None = Query(None, description="Contract id of a just-completed upload"),
+    upload_error: str | None = Query(None, description="Error message from a failed upload"),
+) -> str:
+    """Upload form + list of stored contracts -- the CP4 platform UI's home page.
+
+    ``uploaded``/``upload_error`` are set by the redirect from
+    ``POST /upload/dashboard`` (the form below posts there, not to the plain
+    JSON ``POST /upload``) so a successful or failed upload shows a banner
+    here instead of the browser navigating to and displaying raw JSON.
+    """
+    banner = ""
+    if uploaded:
+        cid = html.escape(uploaded)
+        banner = (
+            f"<div class='callout' style='margin-bottom:1rem;border-color:var(--low-border);"
+            f"background:var(--low-bg);color:var(--low-text);'>"
+            f"Uploaded — <a href='/contracts/{cid}/view'>view clauses</a></div>"
+        )
+    elif upload_error:
+        banner = (
+            f"<div class='callout' style='margin-bottom:1rem;border-color:var(--high-border);"
+            f"background:var(--high-bg);color:var(--high-text);'>"
+            f"Upload failed: {html.escape(upload_error)}</div>"
+        )
+
     rows = []
     for contract_id in store.list_ids():
         contract = store.get(contract_id)
@@ -238,8 +266,9 @@ def dashboard() -> str:
     content = f"""
 <h1>ContractLens</h1>
 <p class='lede'>Privacy-preserving contract intelligence platform.</p>
+{banner}
 <div class='dropzone'>
-  <form action='/upload' method='post' enctype='multipart/form-data' style='display:flex;gap:.75rem;align-items:center;flex:1;flex-wrap:wrap;'>
+  <form action='/upload/dashboard' method='post' enctype='multipart/form-data' style='display:flex;gap:.75rem;align-items:center;flex:1;flex-wrap:wrap;'>
     <input type='file' name='file' required>
     <button type='submit' class='btn btn-primary'>Upload contract</button>
   </form>
@@ -303,6 +332,26 @@ async def upload_contract(file: UploadFile = File(...)) -> dict:
     }
 
 
+@app.post("/upload/dashboard")
+async def upload_contract_from_dashboard(file: UploadFile = File(...)) -> RedirectResponse:
+    """Same ingestion as POST /upload, but for the dashboard's HTML form.
+
+    A plain HTML form POSTing straight to the JSON `/upload` endpoint makes
+    the browser navigate to and display the raw JSON response -- not what a
+    user expects after clicking "Upload" on a webpage. This redirects back
+    to the dashboard instead (303 See Other, so a page refresh afterward
+    doesn't re-submit the upload), with the result surfaced as a banner via
+    query params `dashboard()` reads.
+    """
+    try:
+        contract = await _ingest_upload(file)
+    except HTTPException as exc:
+        return RedirectResponse(
+            url=f"/?upload_error={quote(str(exc.detail))}", status_code=303
+        )
+    return RedirectResponse(url=f"/?uploaded={contract.id}", status_code=303)
+
+
 @app.on_event("startup")
 def _load_existing_contracts_into_index() -> None:
     """Populate the in-memory retrieval index from persisted contracts.
@@ -348,7 +397,8 @@ def view_contract(contract_id: str) -> str:
             f"<div class='clause-head'><h3>{heading}</h3>"
             f"<span class='badge {tag_class(clause.category)}'>"
             f"{html.escape(clause.category)} · {clause.confidence:.0%}</span></div>"
-            f"<p class='offsets'>chars {clause.start_offset}-{clause.end_offset}</p>"
+            f"<p class='offsets'>chars {clause.start_offset}-{clause.end_offset} &middot; "
+            f"<a href='/contracts/{contract_id}/similar/{clause.index}/view'>Find similar clauses</a></p>"
             f"<pre>{snippet}</pre>"
             f"</div>"
         )
@@ -401,6 +451,52 @@ def similar_clauses(
     }
 
 
+@app.get("/contracts/{contract_id}/similar/{clause_index}/view", response_class=HTMLResponse)
+def similar_clauses_view(
+    contract_id: str, clause_index: int, k: int = Query(5, ge=1, le=50)
+) -> str:
+    """HTML view of clauses similar to one clause -- the browser-facing half
+    of the "retrieve similar contractual language" deliverable, linked
+    directly from each clause card in /contracts/{id}/view (the JSON route
+    above has no UI entry point on its own).
+    """
+    contract = store.get(contract_id)
+    if contract is None:
+        raise HTTPException(status_code=404, detail="Contract not found.")
+    if clause_index < 0 or clause_index >= len(contract.clauses):
+        raise HTTPException(status_code=404, detail="Clause not found.")
+
+    source_clause = contract.clauses[clause_index]
+    hits = _clause_index.most_similar_to(contract_id, clause_index, k=k)
+
+    hit_blocks = "".join(
+        f"<div class='clause-card'>"
+        f"<div class='clause-head'><h3>{html.escape(hit.heading or f'Clause {hit.clause_index + 1}')}</h3>"
+        f"<span class='badge {tag_class(hit.category)}'>{html.escape(hit.category)} · sim {hit.score:.2f}</span></div>"
+        f"<p class='offsets'>{html.escape(hit.contract_id)}, clause {hit.clause_index}</p>"
+        f"<pre>{html.escape(hit.text[:400])}</pre>"
+        f"</div>"
+        for hit in hits
+    ) or "<div class='empty-state'>No similar clauses found.</div>"
+
+    fname = html.escape(contract.filename)
+    content = f"""
+<h1>Similar Clauses</h1>
+<p class='lede'>Clauses across all uploaded contracts similar to clause {clause_index} in {fname}.</p>
+<div class='clause-card' style='border-color:var(--primary);'>
+  <div class='clause-head'><h3>Source clause</h3>
+  <span class='badge {tag_class(source_clause.category)}'>{html.escape(source_clause.category)}</span></div>
+  <pre>{html.escape(source_clause.text[:400])}</pre>
+</div>
+<h2>Similar clauses</h2>
+{hit_blocks}
+"""
+    return page(
+        f"ContractLens — Similar Clauses · {fname}", content, active="view",
+        contract_id=contract_id, contract_label=fname,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Checkpoint 3 -- contract comparison
 # --------------------------------------------------------------------------- #
@@ -414,6 +510,98 @@ async def compare_uploaded_contracts(
     revised_contract = await _ingest_upload(revised)
     diff = compare_contracts(base_contract, revised_contract)
     return diff.model_dump()
+
+
+def _change_badge_class(change_type: str) -> str:
+    """Map a ClauseChange.change_type onto a generic badge color -- reusing
+    the same low/medium/high/neutral palette the risk report uses, repurposed
+    here for added/modified/removed/unchanged rather than severity."""
+    return {
+        "added": "badge-low", "removed": "badge-high",
+        "modified": "badge-medium", "unchanged": "badge-neutral",
+    }.get(change_type, "badge-neutral")
+
+
+@app.get("/compare", response_class=HTMLResponse)
+def compare_view() -> str:
+    """Upload-two-contracts HTML form -- the browser-facing half of the
+    "contract comparison assistant" deliverable ("...present them to the
+    user"), which previously had no UI entry point beyond Swagger/curl.
+    """
+    content = """
+<h1>Compare Contracts</h1>
+<p class='lede'>Upload a base contract and a revised version to see what changed, clause by clause.</p>
+<div class='dropzone'>
+  <form action='/compare/html' method='post' enctype='multipart/form-data'
+        style='display:flex;gap:1.25rem;align-items:flex-end;flex-wrap:wrap;width:100%;'>
+    <label style='display:flex;flex-direction:column;gap:.35rem;font-size:.85rem;color:var(--text-muted);'>
+      Base contract
+      <input type='file' name='base' required>
+    </label>
+    <label style='display:flex;flex-direction:column;gap:.35rem;font-size:.85rem;color:var(--text-muted);'>
+      Revised contract
+      <input type='file' name='revised' required>
+    </label>
+    <button type='submit' class='btn btn-primary'>Compare</button>
+  </form>
+</div>
+"""
+    return page("ContractLens — Compare", content, active="compare")
+
+
+@app.post("/compare/html", response_class=HTMLResponse)
+async def compare_uploaded_contracts_html(
+    base: UploadFile = File(..., description="Base contract / template"),
+    revised: UploadFile = File(..., description="Revised / counterparty contract"),
+) -> str:
+    """Same comparison as POST /compare, rendered as an HTML diff page."""
+    base_contract = await _ingest_upload(base)
+    revised_contract = await _ingest_upload(revised)
+    diff = compare_contracts(base_contract, revised_contract)
+
+    summary_chips = "".join(
+        f"<span class='badge {_change_badge_class(change_type)}'>{html.escape(change_type)} · {count}</span> "
+        for change_type, count in diff.summary.items()
+    )
+
+    change_blocks = []
+    for change in diff.changes:
+        if change.change_type == "unchanged":
+            continue
+        texts = []
+        if change.base_text:
+            texts.append(
+                f"<p class='offsets'>Base (clause {change.base_index}):</p>"
+                f"<pre>{html.escape(change.base_text[:400])}</pre>"
+            )
+        if change.revised_text:
+            texts.append(
+                f"<p class='offsets'>Revised (clause {change.revised_index}):</p>"
+                f"<pre>{html.escape(change.revised_text[:400])}</pre>"
+            )
+        change_blocks.append(
+            f"<div class='clause-card'>"
+            f"<div class='clause-head'><h3>{html.escape(change.category)}</h3>"
+            f"<span class='badge {_change_badge_class(change.change_type)}'>"
+            f"{html.escape(change.change_type)} · sim {change.similarity:.2f}</span></div>"
+            f"{''.join(texts)}"
+            f"</div>"
+        )
+
+    unchanged_count = diff.summary.get("unchanged", 0)
+    unchanged_note = (
+        f"<p class='lede'>{unchanged_count} clause(s) unchanged (not shown above).</p>"
+        if unchanged_count else ""
+    )
+    content = f"""
+<h1>Comparison Result</h1>
+<p class='lede'>{html.escape(base_contract.filename)} vs {html.escape(revised_contract.filename)}</p>
+<p>{summary_chips}</p>
+<h2>Changes</h2>
+{''.join(change_blocks) or "<div class='empty-state'>No differences found.</div>"}
+{unchanged_note}
+"""
+    return page("ContractLens — Compare Result", content, active="compare")
 
 
 # --------------------------------------------------------------------------- #

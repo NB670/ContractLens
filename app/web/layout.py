@@ -276,24 +276,25 @@ def nav_bar(
 ) -> str:
     """Top bar: brand mark, optional contract-scoped tabs, optional subject label.
 
-    ``active`` is one of "" (dashboard), "view", "chat", "report" and controls
-    which tab (if any) is highlighted. Escaping of ``contract_label`` is the
-    caller's responsibility (it's already ``html.escape``-d contract data by
-    the time it reaches here in every current call site).
+    ``active`` is one of "" (dashboard), "view", "chat", "report", or
+    "compare" and controls which tab (if any) is highlighted. "Compare" is
+    always shown, on every page -- it isn't scoped to one contract (it takes
+    two fresh uploads), unlike the other three tabs. Escaping of
+    ``contract_label`` is the caller's responsibility (it's already
+    ``html.escape``-d contract data by the time it reaches here in every
+    current call site).
     """
-    tabs_html = ""
-    if contract_id is not None:
-        def tab(key: str, label: str, href: str) -> str:
-            cls = "active" if active == key else ""
-            return f"<a class='{cls}' href='{href}'>{label}</a>"
+    def tab(key: str, label: str, href: str) -> str:
+        cls = "active" if active == key else ""
+        return f"<a class='{cls}' href='{href}'>{label}</a>"
 
-        tabs_html = (
-            "<nav class='tabs'>"
-            + tab("view", "Clauses", f"/contracts/{contract_id}/view")
-            + tab("chat", "Chat", f"/contracts/{contract_id}/chat")
-            + tab("report", "Report", f"/contracts/{contract_id}/report")
-            + "</nav>"
-        )
+    tabs = []
+    if contract_id is not None:
+        tabs.append(tab("view", "Clauses", f"/contracts/{contract_id}/view"))
+        tabs.append(tab("chat", "Chat", f"/contracts/{contract_id}/chat"))
+        tabs.append(tab("report", "Report", f"/contracts/{contract_id}/report"))
+    tabs.append(tab("compare", "Compare", "/compare"))
+    tabs_html = "<nav class='tabs'>" + "".join(tabs) + "</nav>"
 
     subject_html = (
         f"<span class='subject'>{contract_label}</span>" if contract_label else ""
